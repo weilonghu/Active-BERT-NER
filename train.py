@@ -12,7 +12,7 @@ from torch.optim.lr_scheduler import LambdaLR
 from pytorch_transformers.optimization import WarmupLinearSchedule, AdamW
 from tqdm import trange
 
-from SequenceTagger import BertForSequenceTagging
+from sequence_tagger import BertForSequenceTagging
 from data_loader import DataLoader
 from evaluate import evaluate
 import utils
