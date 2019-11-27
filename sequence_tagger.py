@@ -18,21 +18,18 @@ class BertForSequenceTagging(BertPreTrainedModel):
     def forward(self, input_data, token_type_ids=None, attention_mask=None, labels=None,
                 position_ids=None, head_mask=None):
         input_ids, input_token_starts = input_data
-        """ print("input_ids", input_ids.shape)
-        print("input_token_starts", input_token_starts.shape)
-        print("attention_mask", attention_mask.shape)
-        print("labels", labels.shape) """
+
         outputs = self.bert(input_ids, position_ids=position_ids, token_type_ids=token_type_ids,
                             attention_mask=attention_mask, head_mask=head_mask)
         sequence_output = outputs[0]
-        # print("sequence_output", sequence_output.shape)
+
         # obtain original token representations from sub_words representations (by selecting the first sub_word)
         origin_sequence_output = [
             layer[starts.nonzero().squeeze(1)]
             for layer, starts in zip(sequence_output, input_token_starts)]
 
         padded_sequence_output = pad_sequence(origin_sequence_output, batch_first=True)
-        # print("padded_sequence_output", padded_sequence_output.shape)
+
         padded_sequence_output = self.dropout(padded_sequence_output)
         logits = self.classifier(padded_sequence_output)
 
