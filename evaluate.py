@@ -8,7 +8,7 @@ import os
 import numpy as np
 import torch
 
-from SequenceTagger import BertForSequenceTagging, BertConfig
+from sequence_tagger import BertForSequenceTagging
 
 from metrics import f1_score
 from metrics import classification_report
@@ -40,14 +40,14 @@ def evaluate(model, data_iterator, params, mark='Eval', verbose=False):
         # fetch the next evaluation batch
         batch_data, batch_token_starts, batch_tags = next(data_iterator)
         batch_masks = batch_data.gt(0)
-        
+
         loss = model((batch_data, batch_token_starts), token_type_ids=None, attention_mask=batch_masks, labels=batch_tags)[0]
         if params.n_gpu > 1 and params.multi_gpu:
             loss = loss.mean()
         loss_avg.update(loss.item())
-        
+
         batch_output = model((batch_data, batch_token_starts), token_type_ids=None, attention_mask=batch_masks)[0]  # shape: (batch_size, max_len, num_labels)
-        
+
         batch_output = batch_output.detach().cpu().numpy()
         batch_tags = batch_tags.to('cpu').numpy()
 
@@ -72,7 +72,7 @@ def evaluate(model, data_iterator, params, mark='Eval', verbose=False):
 
 if __name__ == '__main__':
     args = parser.parse_args()
-    
+
     tagger_model_dir = 'experiments/' + args.dataset
     # Load the parameters from json file
     json_path = os.path.join(tagger_model_dir, 'params.json')
@@ -106,7 +106,6 @@ if __name__ == '__main__':
 
     data_loader = DataLoader(data_dir, bert_model_dir, params, token_pad_idx=0, tag_pad_idx=-1)
 
-
     # Load data
     test_data = data_loader.load_data('test')
 
@@ -120,11 +119,11 @@ if __name__ == '__main__':
     # Define the model
     # config_path = os.path.join(args.bert_model_dir, 'config.json')
     # config = BertConfig.from_json_file(config_path)
-    ## model = BertForTokenClassification(config, num_labels=len(params.tag2idx))
+    # model = BertForTokenClassification(config, num_labels=len(params.tag2idx))
     # model = BertForSequenceTagging(config)
     model = BertForSequenceTagging.from_pretrained(tagger_model_dir)
     model.to(params.device)
-    
+
     if args.fp16:
         model.half()
     if params.n_gpu > 1 and args.multi_gpu:
@@ -132,4 +131,3 @@ if __name__ == '__main__':
 
     logging.info("Starting evaluation...")
     test_metrics = evaluate(model, test_data_iterator, params, mark='Test', verbose=True)
-

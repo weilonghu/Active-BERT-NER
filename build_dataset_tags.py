@@ -47,11 +47,12 @@ def save_dataset(dataset, save_dir):
 
     # Export the dataset
     with open(os.path.join(save_dir, 'sentences.txt'), 'w') as file_sentences, \
-        open(os.path.join(save_dir, 'tags.txt'), 'w') as file_tags:
+            open(os.path.join(save_dir, 'tags.txt'), 'w') as file_tags:
         for words, tags in dataset:
             file_sentences.write('{}\n'.format(' '.join(words)))
             file_tags.write('{}\n'.format(' '.join(tags)))
     print('- done.')
+
 
 def build_tags(data_dir, tags_file):
     """Build tags from dataset
@@ -78,7 +79,7 @@ if __name__ == '__main__':
     path_test = data_dir + '/test_bio'
     msg = f'{path_train} or {path_test} file not found. Make sure you have downloaded the right dataset'
     assert os.path.isfile(path_train) and os.path.isfile(path_test), msg
-    
+
     # Load the dataset into memory
     print('Loading ' + args.dataset.upper() + ' dataset into memory...')
     train = load_dataset(path_train)
@@ -93,13 +94,12 @@ if __name__ == '__main__':
         random.shuffle(order)
 
         # Split the dataset into train, val(split with shuffle) and test
-        val = [train[idx] for idx in order[:split_val_len]] 
+        val = [train[idx] for idx in order[:split_val_len]]
         train = [train[idx] for idx in order[split_val_len:]]
-    
+
     save_dataset(train, data_dir + '/train')
     save_dataset(val, data_dir + '/val')
     save_dataset(test, data_dir + '/test')
 
     # Build tags from dataset
     build_tags(data_dir, data_dir + '/tags.txt')
-

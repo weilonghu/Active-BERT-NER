@@ -3,12 +3,9 @@
 import random
 import numpy as np
 import os
-import sys
-
 import torch
+from transformers import BertTokenizer
 
-from pytorch_transformers import BertTokenizer
-import utils
 
 class DataLoader(object):
     def __init__(self, data_dir, bert_model_dir, params, token_pad_idx=0, tag_pad_idx=-1):
@@ -37,12 +34,12 @@ class DataLoader(object):
         return tags
 
     def load_sentences_tags(self, sentences_file, tags_file, d):
-        """Loads sentences and tags from their corresponding files. 
+        """Loads sentences and tags from their corresponding files.
             Maps tokens and tags to their indices and stores them in the provided dict d.
         """
         sentences = []
         tags = []
-                    
+
         with open(sentences_file, 'r') as file:
             for line in file:
                 # replace each token by its index
@@ -51,8 +48,8 @@ class DataLoader(object):
                 subword_lengths = list(map(len, subwords))
                 subwords = ['CLS'] + [item for indices in subwords for item in indices]
                 token_start_idxs = 1 + np.cumsum([0] + subword_lengths[:-1])
-                sentences.append((self.tokenizer.convert_tokens_to_ids(subwords),token_start_idxs))
-        
+                sentences.append((self.tokenizer.convert_tokens_to_ids(subwords), token_start_idxs))
+
         with open(tags_file, 'r') as file:
             for line in file:
                 # replace each tag by its index
@@ -78,7 +75,7 @@ class DataLoader(object):
             data: (dict) contains the data with tags for each type in types.
         """
         data = {}
-        
+
         if data_type in ['train', 'val', 'test']:
             sentences_file = os.path.join(self.data_dir, data_type, 'sentences.txt')
             tags_path = os.path.join(self.data_dir, data_type, 'tags.txt')
@@ -93,7 +90,7 @@ class DataLoader(object):
         Args:
             data: (dict) contains data which has keys 'data', 'tags' and 'size'
             shuffle: (bool) whether the data should be shuffled
-            
+
         Yields:
             batch_data: (tensor) shape: (batch_size, max_len)
             batch_tags: (tensor) shape: (batch_size, max_len)
@@ -106,10 +103,10 @@ class DataLoader(object):
             random.shuffle(order)
 
         # one pass over data
-        for i in range(data['size']//self.batch_size):
+        for i in range(data['size'] // self.batch_size):
             # fetch sentences and tags
-            sentences = [data['data'][idx] for idx in order[i*self.batch_size:(i+1)*self.batch_size]]
-            tags = [data['tags'][idx] for idx in order[i*self.batch_size:(i+1)*self.batch_size]]
+            sentences = [data['data'][idx] for idx in order[i * self.batch_size:(i + 1) * self.batch_size]]
+            tags = [data['tags'][idx] for idx in order[i * self.batch_size:(i + 1) * self.batch_size]]
 
             # batch length
             batch_len = len(sentences)
@@ -119,11 +116,10 @@ class DataLoader(object):
             max_subwords_len = min(batch_max_subwords_len, self.max_len)
             max_token_len = 0
 
-
             # prepare a numpy array with the data, initialising the data with pad_idx
             batch_data = self.token_pad_idx * np.ones((batch_len, max_subwords_len))
             batch_token_starts = []
-            
+
             # copy the data to the numpy array
             for j in range(batch_len):
                 cur_subwords_len = len(sentences[j][0])
@@ -136,15 +132,15 @@ class DataLoader(object):
                 token_starts[[idx for idx in token_start_idx if idx < max_subwords_len]] = 1
                 batch_token_starts.append(token_starts)
                 max_token_len = max(int(sum(token_starts)), max_token_len)
-            
+
             batch_tags = self.tag_pad_idx * np.ones((batch_len, max_token_len))
             for j in range(batch_len):
-                cur_tags_len = len(tags[j])  
+                cur_tags_len = len(tags[j])
                 if cur_tags_len <= max_token_len:
                     batch_tags[j][:cur_tags_len] = tags[j]
                 else:
                     batch_tags[j] = tags[j][:max_token_len]
-            
+
             # since all data are indices, we convert them to torch LongTensors
             batch_data = torch.tensor(batch_data, dtype=torch.long)
             batch_token_starts = torch.tensor(batch_token_starts, dtype=torch.long)
@@ -152,6 +148,5 @@ class DataLoader(object):
 
             # shift tensors to GPU if available
             batch_data, batch_token_starts, batch_tags = batch_data.to(self.device), batch_token_starts.to(self.device), batch_tags.to(self.device)
-    
-            yield batch_data, batch_token_starts, batch_tags
 
+            yield batch_data, batch_token_starts, batch_tags
