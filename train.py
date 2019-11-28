@@ -6,9 +6,10 @@ import logging
 import os
 
 import torch
+import transformers
 import torch.nn as nn
 from torch.optim.lr_scheduler import LambdaLR
-from transformers.optimization import WarmupLinearSchedule, AdamW
+from transformers.optimization import AdamW
 from tqdm import trange
 
 from sequence_tagger import BertForSequenceTagging
@@ -64,8 +65,8 @@ def train(model, data_iterator, optimizer, scheduler, params):
         nn.utils.clip_grad_norm_(parameters=model.parameters(), max_norm=params.clip_grad)
 
         # performs updates using calculated gradients
-        scheduler.step()
         optimizer.step()
+        scheduler.step()
 
         # update the average loss
         loss_avg.update(loss.item())
@@ -210,7 +211,7 @@ if __name__ == '__main__':
         # optimizer = AdamW(model.parameters(), lr=params.learning_rate, correct_bias=False)
         optimizer = AdamW(optimizer_grouped_parameters, lr=params.learning_rate, correct_bias=False)
         train_steps_per_epoch = params.train_size // params.batch_size
-        scheduler = WarmupLinearSchedule(optimizer, warmup_steps=train_steps_per_epoch, t_total=params.epoch_num * train_steps_per_epoch)
+        scheduler = transformers.get_linear_schedule_with_warmup(optimizer, num_warmup_steps=train_steps_per_epoch, num_training_steps=params.epoch_num * train_steps_per_epoch)
 
     # Train and evaluate the model
     logging.info("Starting training for {} epoch(s)".format(params.epoch_num))
