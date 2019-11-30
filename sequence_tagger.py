@@ -72,8 +72,6 @@ class BertCRFForSequenceTagging(BertPreTrainedModel):
         self.num_labels = config.num_labels
 
         self.bert = BertModel(config)
-        self.dropout = nn.Dropout(config.hidden_dropout_prob)
-        self.classifier = nn.Linear(config.hidden_size, config.num_labels)
         self.crf = CRF(config.num_labels)
 
         self.init_weights()
@@ -98,20 +96,12 @@ class BertCRFForSequenceTagging(BertPreTrainedModel):
                             attention_mask=attention_mask, head_mask=head_mask)
         sequence_output = outputs[0]
 
-        # obtain original token representations from sub_words representations (by selecting the first sub_word)
-        origin_sequence_output = [
-            layer[starts.nonzero().squeeze(1)]
-            for layer, starts in zip(sequence_output, input_token_starts)]
-
-        padded_sequence_output = pad_sequence(origin_sequence_output, batch_first=True)
-
-        padded_sequence_output = self.dropout(padded_sequence_output)
-        logits = self.classifier(padded_sequence_output)
-
-        outputs = (logits,)
-        # For training
-        if labels is not None:
-            loss = self.crf.negative_log_loss(padded_sequence_output, input_token_starts, labels)
+        if labels is not None: # For training
+            loss = self.crf.negative_log_loss(sequence_output, input_token_starts, labels)
             outputs = (loss,) + outputs
+        else: # For evaluation
+            best_tags = self.crf.get_batch_best_path(sequence_output, input_token_starts)
+            logits = nn.functional.one_hot(best_tags, self.num_labels)
+            outputs = (logits,)
 
         return outputs  # (loss), scores
