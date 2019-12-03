@@ -2,8 +2,8 @@ from transformers import BertPreTrainedModel, BertModel
 from torch.nn.utils.rnn import pad_sequence
 from torch.nn import CrossEntropyLoss
 import torch.nn as nn
-
-from crf import CRF
+import torch
+from torchcrf import CRF
 
 
 class BertOnlyForSequenceTagging(BertPreTrainedModel):
@@ -12,7 +12,7 @@ class BertOnlyForSequenceTagging(BertPreTrainedModel):
     def __init__(self, config):
         super(BertOnlyForSequenceTagging, self).__init__(config)
         self.num_labels = config.num_labels
-
+        self.device = 'cpu'
         self.bert = BertModel(config)
         self.dropout = nn.Dropout(config.hidden_dropout_prob)
         self.classifier = nn.Linear(config.hidden_size, config.num_labels)
@@ -21,18 +21,6 @@ class BertOnlyForSequenceTagging(BertPreTrainedModel):
 
     def forward(self, input_data, token_type_ids=None, attention_mask=None, labels=None,
                 position_ids=None, head_mask=None):
-        """Use crf for sequence tagging.
-
-        For example, in the case of max_seq_length=10:
-          raw_data:          你 是 一 个 人 le
-          token:       [CLS] 你 是 一 个 人 ##le [SEP]
-          input_ids:     101 2  12 13 16 14 15   102   0 0
-          attention_mask:  1 1  1  1  1  1   1     1   0 0
-          labels:            T  T  O  O  O
-          starts:          0 1  1  1  1  1   0     0   0 0
-
-        starts means 'input_token_starts', it can be used for mask in crf.
-        """
         input_ids, input_token_starts = input_data
 
         outputs = self.bert(input_ids, position_ids=position_ids, token_type_ids=token_type_ids,
@@ -74,9 +62,9 @@ class BertCRFForSequenceTagging(BertPreTrainedModel):
     def __init__(self, config):
         super(BertCRFForSequenceTagging, self).__init__(config)
         self.num_labels = config.num_labels
-
+        self.device = 'cpu'
         self.bert = BertModel(config)
-        self.crf = CRF(config.num_labels)
+        self.crf = CRF(config.num_labels, batch_first=True)
         self.classifier = nn.Linear(config.hidden_size, config.num_labels)
 
         self.init_weights()
@@ -97,18 +85,32 @@ class BertCRFForSequenceTagging(BertPreTrainedModel):
         """
         input_ids, input_token_starts = input_data
 
-        bert_outputs = self.bert(input_ids, position_ids=position_ids, token_type_ids=token_type_ids,
-                                 attention_mask=attention_mask, head_mask=head_mask)
-        sequence_output = self.classifier(bert_outputs[0])
+        outputs = self.bert(input_ids, position_ids=position_ids, token_type_ids=token_type_ids,
+                            attention_mask=attention_mask, head_mask=head_mask)
+        sequence_output = outputs[0]
 
+        # obtain original token representations from sub_words representations (by selecting the first sub_word)
+        origin_sequence_output = []
+        origin_sequence_mask = []
+        for layer, starts in zip(sequence_output, input_token_starts):
+            one_sequence_out = layer[starts.nonzero().squeeze(1)]
+            one_sequence_mask = torch.ones(one_sequence_out.size(0), dtype=torch.uint8).to(self.device)
+            origin_sequence_output.append(one_sequence_out)
+            origin_sequence_mask.append(one_sequence_mask)
+
+        padded_sequence_output = pad_sequence(
+            origin_sequence_output, batch_first=True)
+        padded_sequence_mask = pad_sequence(
+            origin_sequence_mask, batch_first=True)
+
+        emissions = self.classifier(padded_sequence_output)
+
+        outputs = (emissions,)
         if labels is not None:  # For training
-            loss = self.crf.negative_log_loss(
-                sequence_output, input_token_starts, labels)
-            outputs = (loss, sequence_output)
+            loss = -1 * self.crf(emissions, labels, mask=padded_sequence_mask)
+            outputs = (loss,) + outputs
         else:  # For evaluation
-            best_tags = self.crf.get_batch_best_path(
-                sequence_output, input_token_starts)
-            logits = nn.functional.one_hot(best_tags, self.num_labels)
-            outputs = (logits,)
+            best_tags = self.crf.decode(emissions, padded_sequence_mask)
+            outputs = (best_tags,)
 
         return outputs  # (loss), scores

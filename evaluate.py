@@ -17,10 +17,14 @@ from data_loader import DataLoader
 import utils
 
 parser = argparse.ArgumentParser()
-parser.add_argument('--dataset', default='conll', help="Directory containing the dataset")
-parser.add_argument('--seed', type=int, default=23, help="random seed for initialization")
-parser.add_argument('--multi_gpu', default=False, action='store_true', help="Whether to use multiple GPUs if available")
-parser.add_argument('--fp16', default=False, action='store_true', help="Whether to use 16-bit float precision instead of 32-bit")
+parser.add_argument('--dataset', default='conll',
+                    help="Directory containing the dataset")
+parser.add_argument('--seed', type=int, default=23,
+                    help="random seed for initialization")
+parser.add_argument('--multi_gpu', default=False, action='store_true',
+                    help="Whether to use multiple GPUs if available")
+parser.add_argument('--fp16', default=False, action='store_true',
+                    help="Whether to use 16-bit float precision instead of 32-bit")
 
 
 def evaluate(model, data_iterator, params, mark='Eval', verbose=False):
@@ -41,18 +45,36 @@ def evaluate(model, data_iterator, params, mark='Eval', verbose=False):
         batch_data, batch_token_starts, batch_tags = next(data_iterator)
         batch_masks = batch_data.gt(0)
 
-        loss = model((batch_data, batch_token_starts), token_type_ids=None, attention_mask=batch_masks, labels=batch_tags)[0]
+        loss = model((batch_data, batch_token_starts), token_type_ids=None,
+                     attention_mask=batch_masks, labels=batch_tags)[0]
         if params.n_gpu > 1 and params.multi_gpu:
             loss = loss.mean()
         loss_avg.update(loss.item())
 
-        batch_output = model((batch_data, batch_token_starts), token_type_ids=None, attention_mask=batch_masks)[0]  # shape: (batch_size, max_len, num_labels)
+        batch_output = model((batch_data, batch_token_starts),
+                             token_type_ids=None, attention_mask=batch_masks)[0]
 
-        batch_output = batch_output.detach().cpu().numpy()
-        batch_tags = batch_tags.to('cpu').numpy()
+        if type(batch_output) == torch.Tensor:
+            # outputs are logits and the labels must be calculated again
+            # shape: (batch_size, max_len, num_labels)
+            batch_output = batch_output.detach().cpu().numpy()
+            batch_tags = batch_tags.to('cpu').numpy()
 
-        pred_tags.extend([[idx2tag.get(idx) for idx in indices] for indices in np.argmax(batch_output, axis=2)])
-        true_tags.extend([[idx2tag.get(idx) if idx != -1 else 'O' for idx in indices] for indices in batch_tags])
+            pred_tags.extend([[idx2tag.get(idx) for idx in indices]
+                              for indices in np.argmax(batch_output, axis=2)])
+            true_tags.extend([[idx2tag.get(
+                idx) if idx != -1 else 'O' for idx in indices] for indices in batch_tags])
+        else:
+            # Outputs are labels
+            # shape: List[List[int]]
+            batch_tags = batch_tags.to('cpu').numpy()
+            pred_tags.extend([[idx2tag.get(idx) for idx in indices]
+                              for indices in batch_output])
+            true_tags.extend([[idx2tag.get(
+                idx) if idx != -1 else 'O' for idx in indices] for indices in batch_tags])
+            # padding pred_tags
+            for idx in range(len(pred_tags)):
+                pred_tags[idx].extend(['O' for _ in range(len(true_tags[idx]) - len(pred_tags[idx]))])
 
     assert len(pred_tags) == len(true_tags)
 
@@ -61,7 +83,8 @@ def evaluate(model, data_iterator, params, mark='Eval', verbose=False):
     f1 = f1_score(true_tags, pred_tags)
     metrics['loss'] = loss_avg()
     metrics['f1'] = f1
-    metrics_str = "; ".join("{}: {:05.2f}".format(k, v) for k, v in metrics.items())
+    metrics_str = "; ".join("{}: {:05.2f}".format(k, v)
+                            for k, v in metrics.items())
     logging.info("- {} metrics: ".format(mark) + metrics_str)
 
     if verbose:
@@ -76,11 +99,13 @@ if __name__ == '__main__':
     tagger_model_dir = 'experiments/' + args.dataset
     # Load the parameters from json file
     json_path = os.path.join(tagger_model_dir, 'params.json')
-    assert os.path.isfile(json_path), "No json configuration file found at {}".format(json_path)
+    assert os.path.isfile(
+        json_path), "No json configuration file found at {}".format(json_path)
     params = utils.Params(json_path)
 
     # Use GPUs if available
-    params.device = torch.device('cuda' if torch.cuda.is_available() else 'cpu')
+    params.device = torch.device(
+        'cuda' if torch.cuda.is_available() else 'cpu')
     params.n_gpu = torch.cuda.device_count()
     params.multi_gpu = args.multi_gpu
 
@@ -104,7 +129,8 @@ if __name__ == '__main__':
     elif args.dataset in ["msra"]:
         bert_model_dir = 'pretrained_bert_models/bert-base-chinese/'
 
-    data_loader = DataLoader(data_dir, bert_model_dir, params, token_pad_idx=0, tag_pad_idx=-1)
+    data_loader = DataLoader(data_dir, bert_model_dir,
+                             params, token_pad_idx=0, tag_pad_idx=-1)
 
     # Load data
     test_data = data_loader.load_data('test')
@@ -122,6 +148,7 @@ if __name__ == '__main__':
     # model = BertForTokenClassification(config, num_labels=len(params.tag2idx))
     # model = BertForSequenceTagging(config)
     model = BertForSequenceTagging.from_pretrained(tagger_model_dir)
+    model.device = params.device
     model.to(params.device)
 
     if args.fp16:
@@ -130,4 +157,5 @@ if __name__ == '__main__':
         model = torch.nn.DataParallel(model)
 
     logging.info("Starting evaluation...")
-    test_metrics = evaluate(model, test_data_iterator, params, mark='Test', verbose=True)
+    test_metrics = evaluate(model, test_data_iterator,
+                            params, mark='Test', verbose=True)
