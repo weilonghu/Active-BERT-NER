@@ -64,6 +64,7 @@ class BertCRFForSequenceTagging(BertPreTrainedModel):
         self.num_labels = config.num_labels
         self.device = 'cpu'
         self.bert = BertModel(config)
+        self.dropout = nn.Dropout(config.hidden_dropout_prob)
         self.crf = CRF(config.num_labels, batch_first=True)
         self.classifier = nn.Linear(config.hidden_size, config.num_labels)
 
@@ -103,6 +104,7 @@ class BertCRFForSequenceTagging(BertPreTrainedModel):
         padded_sequence_mask = pad_sequence(
             origin_sequence_mask, batch_first=True)
 
+        padded_sequence_output = self.dropout(padded_sequence_output)
         emissions = self.classifier(padded_sequence_output)
 
         outputs = (emissions,)
