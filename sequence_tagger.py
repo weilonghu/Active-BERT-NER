@@ -8,6 +8,7 @@ from crf import CRF
 
 class BertOnlyForSequenceTagging(BertPreTrainedModel):
     """Only use Bert for sequence tagging, with other layers"""
+
     def __init__(self, config):
         super(BertOnlyForSequenceTagging, self).__init__(config)
         self.num_labels = config.num_labels
@@ -43,7 +44,8 @@ class BertOnlyForSequenceTagging(BertPreTrainedModel):
             layer[starts.nonzero().squeeze(1)]
             for layer, starts in zip(sequence_output, input_token_starts)]
 
-        padded_sequence_output = pad_sequence(origin_sequence_output, batch_first=True)
+        padded_sequence_output = pad_sequence(
+            origin_sequence_output, batch_first=True)
 
         padded_sequence_output = self.dropout(padded_sequence_output)
         logits = self.classifier(padded_sequence_output)
@@ -59,7 +61,8 @@ class BertOnlyForSequenceTagging(BertPreTrainedModel):
                 active_labels = labels.view(-1)[active_loss]
                 loss = loss_fct(active_logits, active_labels)
             else:
-                loss = loss_fct(logits.view(-1, self.num_labels), labels.view(-1))
+                loss = loss_fct(
+                    logits.view(-1, self.num_labels), labels.view(-1))
             outputs = (loss,) + outputs
 
         return outputs  # (loss), scores
@@ -67,12 +70,14 @@ class BertOnlyForSequenceTagging(BertPreTrainedModel):
 
 class BertCRFForSequenceTagging(BertPreTrainedModel):
     """Use Bert and CRF for sequence tagging"""
+
     def __init__(self, config):
         super(BertCRFForSequenceTagging, self).__init__(config)
         self.num_labels = config.num_labels
 
         self.bert = BertModel(config)
         self.crf = CRF(config.num_labels)
+        self.classifier = nn.Linear(config.hidden_size, config.num_labels)
 
         self.init_weights()
 
@@ -92,15 +97,17 @@ class BertCRFForSequenceTagging(BertPreTrainedModel):
         """
         input_ids, input_token_starts = input_data
 
-        outputs = self.bert(input_ids, position_ids=position_ids, token_type_ids=token_type_ids,
-                            attention_mask=attention_mask, head_mask=head_mask)
-        sequence_output = outputs[0]
+        bert_outputs = self.bert(input_ids, position_ids=position_ids, token_type_ids=token_type_ids,
+                                 attention_mask=attention_mask, head_mask=head_mask)
+        sequence_output = self.classifier(bert_outputs[0])
 
-        if labels is not None: # For training
-            loss = self.crf.negative_log_loss(sequence_output, input_token_starts, labels)
-            outputs = (loss,) + outputs
-        else: # For evaluation
-            best_tags = self.crf.get_batch_best_path(sequence_output, input_token_starts)
+        if labels is not None:  # For training
+            loss = self.crf.negative_log_loss(
+                sequence_output, input_token_starts, labels)
+            outputs = (loss, sequence_output)
+        else:  # For evaluation
+            best_tags = self.crf.get_batch_best_path(
+                sequence_output, input_token_starts)
             logits = nn.functional.one_hot(best_tags, self.num_labels)
             outputs = (logits,)
 

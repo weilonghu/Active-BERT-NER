@@ -176,7 +176,8 @@ def argmax(matrix, dim=0):
     return index
 
 
-def padding(vec, max_len, pad_token=-1):
+def padding(vec, max_len, pad_token=8):
+    """Set the labels of padded token to 'O'"""
     new_vec = torch.zeros(max_len).long()
     new_vec[:vec.size(0)] = vec
     new_vec[vec.size(0):] = pad_token

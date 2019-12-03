@@ -12,7 +12,7 @@ from torch.optim.lr_scheduler import LambdaLR
 from transformers.optimization import AdamW
 from tqdm import trange
 
-from sequence_tagger import BertForSequenceTagging
+from sequence_tagger import BertCRFForSequenceTagging as BertForSequenceTagging
 from data_loader import DataLoader
 from evaluate import evaluate
 import utils
