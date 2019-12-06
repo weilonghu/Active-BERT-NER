@@ -8,7 +8,7 @@ import os
 import numpy as np
 import torch
 
-from sequence_tagger import BertCRFForSequenceTagging as BertForSequenceTagging
+from sequence_tagger import BertOnlyForSequenceTagging as BertForSequenceTagging
 
 from metrics import f1_score
 from metrics import classification_report

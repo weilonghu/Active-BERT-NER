@@ -37,6 +37,8 @@ class BertOnlyForSequenceTagging(BertPreTrainedModel):
 
         padded_sequence_output = self.dropout(padded_sequence_output)
         logits = self.classifier(padded_sequence_output)
+        # sequence_output = self.dropout(sequence_output)
+        # logits = self.classifier(sequence_output)
 
         outputs = (logits,)
         if labels is not None:

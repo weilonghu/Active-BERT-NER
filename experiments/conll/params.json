@@ -4,11 +4,13 @@
 
     "learning_rate": 5e-5,
     "weight_decay": 0.01,
-    "clip_grad": 5,
+    "clip_grad": 1.0,
+    "warmup_proportion": 0.1,
+    "adam_epsilon": 1e-8,
 
     "batch_size": 32,
-    "epoch_num": 20,
+    "epoch_num": 10,
     "min_epoch_num": 5,
     "patience": 0.02,
-    "patience_num": 10
+    "patience_num": 5
 }
