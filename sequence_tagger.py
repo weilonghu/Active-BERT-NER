@@ -1,4 +1,4 @@
-from transformers import BertPreTrainedModel, BertModel
+from transformers import BertPreTrainedModel, BertModel, BertForTokenClassification
 from torch.nn.utils.rnn import pad_sequence
 from torch.nn import CrossEntropyLoss
 import torch.nn as nn
@@ -6,22 +6,11 @@ import torch
 from torchcrf import CRF
 
 
-class BertOnlyForSequenceTagging(BertPreTrainedModel):
-    """Only use Bert for sequence tagging, with other layers"""
+class BertOnlyForSequenceTagging(BertForTokenClassification):
+    """Only use Bert for sequence tagging, without other layers"""
 
-    def __init__(self, config):
-        super(BertOnlyForSequenceTagging, self).__init__(config)
-        self.num_labels = config.num_labels
-        self.device = 'cpu'
-        self.bert = BertModel(config)
-        self.dropout = nn.Dropout(config.hidden_dropout_prob)
-        self.classifier = nn.Linear(config.hidden_size, config.num_labels)
-
-        self.init_weights()
-
-    def forward(self, input_data, token_type_ids=None, attention_mask=None, labels=None,
-                position_ids=None, head_mask=None):
-        input_ids, input_token_starts = input_data
+    def forward(self, input_ids, token_type_ids=None, attention_mask=None, labels=None,
+                position_ids=None, head_mask=None, label_masks=None):
 
         outputs = self.bert(input_ids, position_ids=position_ids, token_type_ids=token_type_ids,
                             attention_mask=attention_mask, head_mask=head_mask)
@@ -29,31 +18,23 @@ class BertOnlyForSequenceTagging(BertPreTrainedModel):
 
         # obtain original token representations from sub_words representations (by selecting the first sub_word)
         origin_sequence_output = [
-            layer[starts.nonzero().squeeze(1)]
-            for layer, starts in zip(sequence_output, input_token_starts)]
+            layer[mask]
+            for layer, mask in zip(sequence_output, label_masks)]
 
-        padded_sequence_output = pad_sequence(
-            origin_sequence_output, batch_first=True)
+        padded_sequence_output = pad_sequence(origin_sequence_output, batch_first=True, padding_value=-1)
 
         padded_sequence_output = self.dropout(padded_sequence_output)
         logits = self.classifier(padded_sequence_output)
-        # sequence_output = self.dropout(sequence_output)
-        # logits = self.classifier(sequence_output)
 
         outputs = (logits,)
         if labels is not None:
-            loss_mask = labels.gt(-1)
-            loss_fct = CrossEntropyLoss()
-            # Only keep active parts of the loss
-            if loss_mask is not None:
-                active_loss = loss_mask.view(-1) == 1
-                active_logits = logits.view(-1, self.num_labels)[active_loss]
-                active_labels = labels.view(-1)[active_loss]
-                loss = loss_fct(active_logits, active_labels)
-            else:
-                loss = loss_fct(
-                    logits.view(-1, self.num_labels), labels.view(-1))
-            outputs = (loss,) + outputs
+            labels = [label[mask] for mask, label in zip(label_masks, labels)]
+            labels = pad_sequence(labels, batch_first=True, padding_value=-1)
+            loss_fct = CrossEntropyLoss(ignore_index=-1, reduction='sum')
+            mask = (labels != -1)
+            loss = loss_fct(logits.view(-1, self.num_labels), labels.view(-1))
+            loss /= mask.float().sum()
+            outputs = (loss,) + outputs + (labels,)
 
         return outputs  # (loss), scores
 
@@ -84,9 +65,9 @@ class BertCRFForSequenceTagging(BertPreTrainedModel):
           labels:            T  T  O  O  O
           starts:          0 1  1  1  1  1   0     0   0 0
 
-        starts means 'input_token_starts', it can be used for mask in crf.
+        starts means 'label_masks', it can be used for mask in crf.
         """
-        input_ids, input_token_starts = input_data
+        input_ids, label_masks = input_data
 
         outputs = self.bert(input_ids, position_ids=position_ids, token_type_ids=token_type_ids,
                             attention_mask=attention_mask, head_mask=head_mask)
@@ -95,9 +76,10 @@ class BertCRFForSequenceTagging(BertPreTrainedModel):
         # obtain original token representations from sub_words representations (by selecting the first sub_word)
         origin_sequence_output = []
         origin_sequence_mask = []
-        for layer, starts in zip(sequence_output, input_token_starts):
+        for layer, starts in zip(sequence_output, label_masks):
             one_sequence_out = layer[starts.nonzero().squeeze(1)]
-            one_sequence_mask = torch.ones(one_sequence_out.size(0), dtype=torch.uint8).to(self.device)
+            one_sequence_mask = torch.ones(one_sequence_out.size(
+                0), dtype=torch.uint8).to(self.device)
             origin_sequence_output.append(one_sequence_out)
             origin_sequence_mask.append(one_sequence_mask)
 

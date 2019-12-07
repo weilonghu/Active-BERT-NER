@@ -12,5 +12,6 @@
     "epoch_num": 10,
     "min_epoch_num": 5,
     "patience": 0.02,
-    "patience_num": 5
+    "patience_num": 5,
+    "num_workers": 1
 }

@@ -7,13 +7,14 @@ import os
 
 import numpy as np
 import torch
+import torch.nn.functional as F
+from tqdm import trange
 
 from sequence_tagger import BertOnlyForSequenceTagging as BertForSequenceTagging
 
-from metrics import f1_score
-from metrics import classification_report
+from seqeval.metrics import f1_score, classification_report
 
-from data_loader import DataLoader
+from data_set import DataLoader
 import utils
 
 parser = argparse.ArgumentParser()
@@ -40,41 +41,33 @@ def evaluate(model, data_iterator, params, mark='Eval', verbose=False):
     # a running average object for loss
     loss_avg = utils.RunningAverage()
 
-    for _ in range(params.eval_steps):
+    one_epoch = trange(params.eval_steps)
+    for step, batch in zip(one_epoch, data_iterator):
         # fetch the next evaluation batch
-        batch_data, batch_token_starts, batch_tags = next(data_iterator)
-        batch_masks = batch_data.gt(0)
+        input_ids, label_ids, attention_mask, sentence_ids, label_mask = batch
 
-        loss = model((batch_data, batch_token_starts), token_type_ids=None,
-                     attention_mask=batch_masks, labels=batch_tags)[0]
+        with torch.no_grad():
+            loss, logits, labels = model(input_ids, token_type_ids=sentence_ids,
+                                         attention_mask=attention_mask, labels=label_ids, label_masks=label_mask)
         if params.n_gpu > 1 and params.multi_gpu:
             loss = loss.mean()
         loss_avg.update(loss.item())
 
-        batch_output = model((batch_data, batch_token_starts),
-                             token_type_ids=None, attention_mask=batch_masks)[0]
+        batch_output = torch.argmax(F.log_softmax(logits, dim=2), dim=2)
+        batch_output = batch_output.detach().cpu().numpy()
+        batch_tags = labels.to('cpu').numpy()
 
-        if type(batch_output) == torch.Tensor:
-            # outputs are logits and the labels must be calculated again
-            # shape: (batch_size, max_len, num_labels)
-            batch_output = batch_output.detach().cpu().numpy()
-            batch_tags = batch_tags.to('cpu').numpy()
+        batch_true_tags = [
+            [idx2tag.get(idx) for idx in indices[np.where(indices != -1)]]
+            for indices in batch_tags]
+        batch_pred_tags = [
+            [idx2tag.get(idx) for idx in indices[np.where(batch_tags[i] != -1)]]
+            for i, indices in enumerate(batch_output)]
 
-            pred_tags.extend([[idx2tag.get(idx) for idx in indices]
-                              for indices in np.argmax(batch_output, axis=2)])
-            true_tags.extend([[idx2tag.get(
-                idx) if idx != -1 else 'O' for idx in indices] for indices in batch_tags])
-        else:
-            # Outputs are labels
-            # shape: List[List[int]]
-            batch_tags = batch_tags.to('cpu').numpy()
-            pred_tags.extend([[idx2tag.get(idx) for idx in indices]
-                              for indices in batch_output])
-            true_tags.extend([[idx2tag.get(
-                idx) if idx != -1 else 'O' for idx in indices] for indices in batch_tags])
-            # padding pred_tags
-            for idx in range(len(pred_tags)):
-                pred_tags[idx].extend(['O' for _ in range(len(true_tags[idx]) - len(pred_tags[idx]))])
+        true_tags.extend(batch_true_tags)
+        pred_tags.extend(batch_pred_tags)
+
+        one_epoch.set_postfix(eval_loss='{:05.3f}'.format(loss_avg()))
 
     assert len(pred_tags) == len(true_tags)
 
@@ -129,14 +122,13 @@ if __name__ == '__main__':
     elif args.dataset in ["msra"]:
         bert_model_dir = 'pretrained_bert_models/bert-base-chinese/'
 
-    data_loader = DataLoader(data_dir, bert_model_dir,
-                             params, token_pad_idx=0, tag_pad_idx=-1)
+    data_loader = DataLoader(data_dir, bert_model_dir, params)
 
     # Load data
     test_data = data_loader.load_data('test')
 
     # Specify the test set size
-    params.test_size = test_data['size']
+    params.test_size = test_data.__len__()
     params.eval_steps = params.test_size // params.batch_size
     test_data_iterator = data_loader.data_iterator(test_data, shuffle=False)
 

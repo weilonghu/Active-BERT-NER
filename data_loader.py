@@ -8,14 +8,13 @@ from transformers import BertTokenizer
 
 
 class DataLoader(object):
-    def __init__(self, data_dir, bert_model_dir, params, token_pad_idx=0, tag_pad_idx=-1):
+    def __init__(self, data_dir, bert_model_dir, params, token_pad_idx=0, tag_pad_idx=None):
         self.data_dir = data_dir
         self.batch_size = params.batch_size
         self.max_len = params.max_len
         self.device = params.device
         self.seed = params.seed
-        self.token_pad_idx = token_pad_idx
-        self.tag_pad_idx = tag_pad_idx
+        self.UNIQUE_LABELS = ['[CLS]', '[SEP]', 'X']
 
         tags = self.load_tags()
         self.tag2idx = {tag: idx for idx, tag in enumerate(tags)}
@@ -23,7 +22,11 @@ class DataLoader(object):
         params.tag2idx = self.tag2idx
         params.idx2tag = self.idx2tag
 
-        self.tokenizer = BertTokenizer.from_pretrained(bert_model_dir, do_lower_case=True)
+        self.tokenizer = BertTokenizer.from_pretrained(bert_model_dir, do_lower_case=False)
+
+        self.token_pad_idx = token_pad_idx
+        self.tag_pad_idx = tag_pad_idx if tag_pad_idx is not None else self.tag2idx['X']
+        self.sep_token_id = self.tokenizer.convert_tokens_to_ids('[SEP]')
 
     def load_tags(self):
         tags = []
@@ -31,6 +34,7 @@ class DataLoader(object):
         with open(file_path, 'r') as file:
             for tag in file:
                 tags.append(tag.strip())
+        tags.extend(self.UNIQUE_LABELS)
         return tags
 
     def load_sentences_tags(self, sentences_file, tags_file, d):
@@ -93,6 +97,7 @@ class DataLoader(object):
 
         Yields:
             batch_data: (tensor) shape: (batch_size, max_len)
+            batch_token_starts: (tensor) shape: (batch_size, max_len)
             batch_tags: (tensor) shape: (batch_size, max_len)
         """
 
@@ -108,42 +113,51 @@ class DataLoader(object):
             sentences = [data['data'][idx] for idx in order[i * self.batch_size:(i + 1) * self.batch_size]]
             tags = [data['tags'][idx] for idx in order[i * self.batch_size:(i + 1) * self.batch_size]]
 
+            # generate 'x' labels, then input_ids and tags have equal length respectively.
+            xlables = []
+            for idx in range(len(sentences)):
+                subwords, token_start_idxs = sentences[idx]
+                xlabel = [self.tag2idx.get('[CLS]')] + [self.tag2idx.get('X')] * (len(subwords) - 1)
+                for i, start in enumerate(token_start_idxs):
+                    xlabel[start] = tags[idx][i]
+                xlables.append(xlabel)
+            tags = xlables
+
             # batch length
             batch_len = len(sentences)
 
             # compute length of longest sentence in batch
             batch_max_subwords_len = max([len(s[0]) for s in sentences])
-            max_subwords_len = min(batch_max_subwords_len, self.max_len)
-            max_token_len = 0
+            max_subwords_len = min(batch_max_subwords_len + 1, self.max_len)
 
             # prepare a numpy array with the data, initialising the data with pad_idx
             batch_data = self.token_pad_idx * np.ones((batch_len, max_subwords_len))
+            batch_tags = self.tag_pad_idx * np.ones((batch_len, max_subwords_len))
             batch_token_starts = []
 
             # copy the data to the numpy array
+            # the last subword must be '[SEP]'
             for j in range(batch_len):
                 cur_subwords_len = len(sentences[j][0])
-                if cur_subwords_len <= max_subwords_len:
+                if cur_subwords_len < max_subwords_len:
                     batch_data[j][:cur_subwords_len] = sentences[j][0]
+                    batch_data[j][cur_subwords_len] = self.sep_token_id
+                    batch_tags[j][:cur_subwords_len] = tags[j]
+                    batch_tags[j][cur_subwords_len] = self.tag2idx.get('[SEP]')
                 else:
-                    batch_data[j] = sentences[j][0][:max_subwords_len]
+                    batch_data[j][:max_subwords_len - 1] = sentences[j][0][:max_subwords_len - 1]
+                    batch_data[j][max_subwords_len - 1] = self.sep_token_id
+                    batch_tags[j][:max_subwords_len - 1] = tags[j][:max_subwords_len - 1]
+                    batch_tags[j][max_subwords_len - 1] = self.tag2idx.get('[SEP]')
+
                 token_start_idx = sentences[j][-1]
                 token_starts = np.zeros(max_subwords_len)
-                token_starts[[idx for idx in token_start_idx if idx < max_subwords_len]] = 1
+                token_starts[[idx for idx in token_start_idx if idx < max_subwords_len - 1]] = 1
                 batch_token_starts.append(token_starts)
-                max_token_len = max(int(sum(token_starts)), max_token_len)
-
-            batch_tags = self.tag_pad_idx * np.ones((batch_len, max_token_len))
-            for j in range(batch_len):
-                cur_tags_len = len(tags[j])
-                if cur_tags_len <= max_token_len:
-                    batch_tags[j][:cur_tags_len] = tags[j]
-                else:
-                    batch_tags[j] = tags[j][:max_token_len]
 
             # since all data are indices, we convert them to torch LongTensors
             batch_data = torch.tensor(batch_data, dtype=torch.long)
-            batch_token_starts = torch.tensor(batch_token_starts, dtype=torch.long)
+            batch_token_starts = torch.tensor(batch_token_starts, dtype=torch.bool)
             batch_tags = torch.tensor(batch_tags, dtype=torch.long)
 
             # shift tensors to GPU if available
