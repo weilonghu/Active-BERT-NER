@@ -76,7 +76,7 @@ def evaluate(model, data_iterator, params, mark='Eval', verbose=False):
     f1 = f1_score(true_tags, pred_tags)
     metrics['loss'] = loss_avg()
     metrics['f1'] = f1
-    metrics_str = "; ".join("{}: {:05.4f}".format(k, v)
+    metrics_str = "; ".join("{}: {:05.2f}".format(k, v)
                             for k, v in metrics.items())
     logging.info("- {} metrics: ".format(mark) + metrics_str)
 
