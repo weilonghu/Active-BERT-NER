@@ -140,7 +140,6 @@ if __name__ == '__main__':
     # model = BertForTokenClassification(config, num_labels=len(params.tag2idx))
     # model = BertForSequenceTagging(config)
     model = BertForSequenceTagging.from_pretrained(tagger_model_dir)
-    model.device = params.device
     model.to(params.device)
 
     if args.fp16:

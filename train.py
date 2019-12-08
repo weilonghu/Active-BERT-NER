@@ -82,7 +82,6 @@ def train_and_evaluate(model, train_data, val_data, optimizer, scheduler, params
     # reload weights from restore_dir if specified
     if restore_dir is not None:
         model = BertForSequenceTagging.from_pretrained(tagger_model_dir)
-        model.device = params.device
 
     best_val_f1 = 0.0
     patience_counter = 0
@@ -181,7 +180,6 @@ if __name__ == '__main__':
     # Prepare model
     model = BertForSequenceTagging.from_pretrained(
         bert_model_dir, num_labels=len(params.tag2idx))
-    model.device = params.device
     model.to(params.device)
     if args.fp16:
         model.half()
