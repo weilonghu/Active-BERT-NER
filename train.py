@@ -13,7 +13,7 @@ from transformers.optimization import AdamW
 from tqdm import trange
 
 from sequence_tagger import BertOnlyForSequenceTagging as BertForSequenceTagging
-from data_set import DataLoader
+from data_loader import DataLoader
 from evaluate import evaluate
 import utils
 
