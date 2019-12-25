@@ -1,6 +1,6 @@
 # BERT-NER
 
-**This project implements an solution to the "X" label issue (e.g., [#148](https://github.com/huggingface/pytorch-transformers/issues/148), [#422](https://github.com/huggingface/pytorch-transformers/issues/422)) of NER task in Google's BERT [paper](https://arxiv.org/pdf/1810.04805.pdf), and is developed mostly based on lemonhu's [work](https://github.com/lemonhu/NER-BERT-pytorch) and bheinzerling's [suggestion](https://github.com/huggingface/pytorch-transformers/issues/64#issuecomment-443703063).**
+**This project implements an solution mostly based on [weizhepei](https://github.com/weizhepei/BERT-NER)'s work and [chnsh](https://github.com/chnsh/BERT-NER-CoNLL)'s work.**
 
 ## Dataset
 
@@ -11,11 +11,11 @@
 
 This repo was tested on Python 3.6+ and PyTorch 1.0.1. The requirements are:
 
-- tensorflow >= 1.11.0
-- pytorch >= 1.0.1
-- pytorch-transformers == 1.0.0
+- tensorflow (optional) >= 1.11.0
+- pytorch == 1.1.0
+- pytorch-transformers == 2.2.1
 - tqdm
-- apex
+- apex (optional)
 
 **Note**: The tensorflow library is only used for the conversion of pre-trained models from TensorFlow to PyTorch. apex is a tool for easy mixed precision and distributed training in Pytorch, please see https://github.com/NVIDIA/apex.
 
