@@ -91,6 +91,12 @@ def set_logger(log_path):
         logger.addHandler(stream_handler)
 
 
+def save_json(params, json_file):
+    """Save params dict to a json file"""
+    with open(json_file, 'w') as fp:
+        json.dump(params, fp, indent=4)
+
+
 def save_checkpoint(state, is_best, checkpoint):
     """Saves model and training parameters at checkpoint + 'last.pth.tar'. If is_best==True, also saves
     checkpoint + 'best.pth.tar'
