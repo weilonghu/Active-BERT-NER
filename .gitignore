@@ -105,6 +105,9 @@ venv.bak/
 
 # vscode
 .vscode
-data
-pretrained_bert_models
-experiments
+experiments/conll/pytorch_model.bin
+experiments/conll/train.log
+experiments/conll/params.json
+pretrained_bert_models/bert-base-cased/pytorch_model.bin
+pretrained_bert_models/bert-base-cased/vocab.txt
+experiments/msra/params.json
