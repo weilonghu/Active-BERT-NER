@@ -102,3 +102,9 @@ venv.bak/
 
 # mypy
 .mypy_cache/
+
+# vscode
+.vscode
+data
+pretrained_bert_models
+experiments
