@@ -8,10 +8,10 @@ import numpy as np
 import torch.nn.functional as F
 
 import torch
-import transformers
 import torch.nn as nn
 from torch.optim.lr_scheduler import LambdaLR
 from transformers.optimization import AdamW
+from transformers import BertTokenizer
 from tqdm import trange
 from seqeval.metrics import f1_score, classification_report
 
@@ -33,58 +33,60 @@ parser.add_argument('--loss_scale', type=float, default=0,
                     "Positive power of 2: static loss scaling value.\n")
 parser.add_argument('--full_finetuning', action='store_true', help='BERT: If full finetuning bert model')
 parser.add_argument('--max_len', default=128, type=int, help='BERT: maximul sequence lenghth')
+parser.add_argument('--bert_model_dir', default='pretrained_bert_models', type=str, help='BERT: directory containing BERT model')
 parser.add_argument('--learning_rate', default=5e-5, type=float, help='Learning rate for the optimizer')
 parser.add_argument('--weight_decay', default=0.01, type=float, help='Weight decay for the optimizer')
 parser.add_argument('--clip_grad', default=1.0, type=float, help='Gradient clipping')
 parser.add_argument('--warmup_proportion', default=0.1, type=float, help='Warmup configuration for the optimizer')
 parser.add_argument('--adam_epsilon', default=1e-8, type=float, help='Configuration for the optimizer')
 parser.add_argument('--batch_size', default=32, type=int, help='Batch size for training and testing')
-parser.add_argument('--max_epoch', default=10, type=int, help='Number of maximum epochs')
-parser.add_argument('--min_epoch', default=5, type=int, help='Number of minimum epochs')
-parser.add_argument('--patience', default=0.02, type=float, help='Increasement between two epochs')
-parser.add_argument('--patience_num', default=5, type=int, help='Early stopping creteria')
+parser.add_argument('--num_epoch', default=10, type=int, help='Number of training epochs')
+parser.add_argument('--num_workers', default=0, type=int, help='Number of workers for pytorch DataLoader')
+parser.add_argument('--train_size', default=0, type=float, help='Proportion of train dataset for initialized training')
+parser.add_argument('--do_train', action='store_false', help='If train the model')
+parser.add_argument('--do_test', action='store_false', help='If test the model')
 
 
-def train(model, data_iterator, optimizer, scheduler, params):
+def train(model, data_iterator, optimizer, params):
     """Train the model on `steps` batches"""
     # set model to training mode
     model.train()
-    # scheduler.step()
 
+    logging.info('Train for {} epochs'.format(params.num_epoch))
     # a running average object for loss
     loss_avg = utils.RunningAverage()
 
-    # Use tqdm for progress bar
-    one_epoch = trange(params.train_steps)
-    for step, batch in zip(one_epoch, data_iterator):
-        # fetch the next training batch
-        input_ids, label_ids, attention_mask, sentence_ids, label_mask = batch
+    for _ in range(params.num_epoch):
+        for batch in data_iterator:
+            # fetch the next training batch
+            input_ids, label_ids, attention_mask, sentence_ids, label_mask = batch
 
-        # compute model output and loss
-        loss = model(input_ids, token_type_ids=sentence_ids,
-                     attention_mask=attention_mask, labels=label_ids, label_masks=label_mask)[0]
+            # compute model output and loss
+            loss = model(input_ids, token_type_ids=sentence_ids,
+                         attention_mask=attention_mask, labels=label_ids, label_masks=label_mask)[0]
 
-        if params.n_gpu > 1 and args.multi_gpu:
-            loss = loss.mean()  # mean() to average on multi-gpu
+            if params.n_gpu > 1 and args.multi_gpu:
+                loss = loss.mean()  # mean() to average on multi-gpu
 
-        if args.fp16:
-            optimizer.backward(loss)
-        else:
-            loss.backward()
+            if args.fp16:
+                optimizer.backward(loss)
+            else:
+                loss.backward()
 
-        # gradient clipping
-        nn.utils.clip_grad_norm_(
-            parameters=model.parameters(), max_norm=params.clip_grad)
+            # gradient clipping
+            nn.utils.clip_grad_norm_(
+                parameters=model.parameters(), max_norm=params.clip_grad)
 
-        # performs updates using calculated gradients
-        optimizer.step()
-        scheduler.step()
-        # clear previous gradients, compute gradients of all variables wrt loss
-        model.zero_grad()
+            # performs updates using calculated gradients
+            optimizer.step()
+            scheduler.step()
+            # clear previous gradients, compute gradients of all variables wrt loss
+            model.zero_grad()
 
-        # update the average loss
-        loss_avg.update(loss.item())
-        one_epoch.set_postfix(loss='{:05.3f}'.format(loss_avg()))
+            # update the average loss
+            loss_avg.update(loss.item())
+
+    return loss_avg()
 
 
 def evaluate(model, data_iterator, params, mark='Eval', verbose=False):
@@ -145,11 +147,8 @@ def evaluate(model, data_iterator, params, mark='Eval', verbose=False):
     return metrics
 
 
-def train_and_evaluate(model, train_data, val_data, optimizer, scheduler, params, model_dir, restore_dir=None):
+def train_active(model, train_data, val_data, optimizer, scheduler, params, model_dir):
     """Train the model and evaluate every epoch."""
-    # reload weights from restore_dir if specified
-    if restore_dir is not None:
-        model = BertForSequenceTagging.from_pretrained(restore_dir)
 
     best_val_f1 = 0.0
     patience_counter = 0
@@ -223,28 +222,8 @@ if __name__ == '__main__':
     utils.set_logger(os.path.join(model_dir, 'train.log'))
     logging.info("device: {}, n_gpu: {}, 16-bits training: {}".format(params.device, params.n_gpu, args.fp16))
 
-    # Create the input data pipeline
-    logging.info("Loading the datasets...")
-
-    # Initialize the DataLoader
-    data_dir = 'data/' + args.dataset
-    if args.dataset in ["conll"]:
-        bert_model_dir = 'pretrained_bert_models/bert-base-cased/'
-    elif args.dataset in ["msra"]:
-        bert_model_dir = 'pretrained_bert_models/bert-base-chinese/'
-
-    data_loader = DataLoader(data_dir, bert_model_dir, params)
-
-    # Load training data and test data
-    train_data = data_loader.load_data('train')
-    val_data = data_loader.load_data('val')
-
-    # Specify the training and validation dataset sizes
-    params.train_size = train_data.__len__()
-    params.val_size = val_data.__len__()
-
     # Prepare model
-    model = BertForSequenceTagging.from_pretrained(bert_model_dir, num_labels=len(params.tag2idx))
+    model = BertForSequenceTagging.from_pretrained(params.bert_model_dir, num_labels=len(params.tag2idx))
     model.to(params.device)
     if args.fp16:
         model.half()
@@ -289,12 +268,28 @@ if __name__ == '__main__':
         # optimizer = AdamW(model.parameters(), lr=params.learning_rate, correct_bias=False)
         optimizer = AdamW(optimizer_grouped_parameters,
                           lr=params.learning_rate)
-        train_steps_per_epoch = params.train_size // params.batch_size
-        warmup_steps = int(params.warmup_proportion * params.epoch_num * train_steps_per_epoch)
-        scheduler = transformers.get_linear_schedule_with_warmup(
-            optimizer, num_warmup_steps=warmup_steps, num_training_steps=params.epoch_num * train_steps_per_epoch)
+
+    # restore the model
+    if params.restore_dir is not None:
+        model = BertForSequenceTagging.from_pretrained(params.restore_dir)
+
+    # Create the input data pipeline
+    logging.info("Loading the datasets...")
+    tokenizer = BertTokenizer.from_pretrained(params.bert_model_dir, do_lower_case=False)
+    data_loader = DataLoader(tokenizer, params)
 
     # Train and evaluate the model
-    logging.info("Starting training for {} epoch(s)".format(params.epoch_num))
-    train_and_evaluate(model, train_data, val_data, optimizer,
-                       scheduler, params, model_dir, args.restore_dir)
+    if params.do_train:
+        if params.train_size > 0:
+            logging.info("Starting training for {} epoch(s)".format(params.epoch_num))
+            train_iter = data_loader.create_iterator('train')
+            train(model, train_iter, optimizer, params)
+
+        if params.train_size < 1:
+            logging.info('Start training using active learning...')
+            train_active(model, data_loader, optimizer, params, model_dir)
+
+    if params.do_test:
+        logging.info('Starting testing the model...')
+        test_iter = data_loader.create_iterator('test', shuffle=False)
+        evaluate(model, test_iter, params, mark='Test', verbose=True)

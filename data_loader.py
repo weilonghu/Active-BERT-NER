@@ -1,43 +1,25 @@
 import os
 import torch
+from collections import defaultdict
 from torch.utils import data
-from transformers import BertTokenizer
 
 
-class InputExample(object):
-    """A single training/test example for simple sequence classification."""
+class LDataset(data.Dataset):
+    """Labeled dataset"""
 
-    def __init__(self, guid, text, label=None, segment_ids=None):
-        """Constructs a InputExample.
-        Args:
-          guid: (string) Unique id for the example.
-          text: (string) The untokenized text of the sequence.
-          label: (string) The label of the example.
-        """
-        self.guid = guid
-        self.text = text
-        self.label = label
-        self.segment_ids = segment_ids
-
-
-class Dataset(data.Dataset):
-    """A torch dataset for iterating"""
-
-    def __init__(self, data_list, tokenizer, label_map, max_len, device):
+    def __init__(self, data_list, tokenizer, label_map, max_len):
         """ Construct a dataset for training/evaluating.
 
         Args:
-            data_list: (list) list of InputExample
+            data_list: (list) [(text, label)]
             tokenizer: (BertTokenizer) tokenize words
             label_map: (dict) convert tags to ids
             max_len: (int) maximum length of sequences
-            device: (string) cpu or gpu
         """
         self.max_len = max_len
         self.label_map = label_map
         self.data_list = data_list
         self.tokenizer = tokenizer
-        self.device = device
 
     def __len__(self):
         return len(self.data_list)
@@ -46,11 +28,14 @@ class Dataset(data.Dataset):
         """transform an example in dataset
 
         Return:
-            output: (list) input_ids, label_ids, label_mask, sentence_id, attention_mask
+            output: (list) [input_ids, label_ids, label_mask, sentence_id, attention_mask]
         """
-        input_example = self.data_list[idx]
-        text = input_example.text
-        label = input_example.label
+
+        text, label = self.data_list[idx]
+
+        return self._generate_feature(text, label)
+
+    def _generate_feature(self, text, label):
 
         # the first token must be '[CLS]' and the first label must be '[CLS]' too.
         input_ids = [self.tokenizer.convert_tokens_to_ids('[CLS]')]
@@ -103,27 +88,26 @@ class Dataset(data.Dataset):
 
         # shift tensors to GPU if available
         output = [input_ids, label_ids, attention_mask, sentence_id, label_mask]
-        output = [item.to(self.device) for item in output]
+        # output = [item.to(self.device) for item in output]
 
         return output
+
+
+class UDataset(LDataset):
+    pass
 
 
 class DataLoader:
     """Pytorch DataLoader"""
 
-    def __init__(self, data_dir, bert_model_dir, params):
+    def __init__(self, tokenizer, params):
         """
         Args:
             data_dir: (string) directory contains 'train.txt', 'val.txt' and 'test.txt'
             bert_model_dir: (string) for constructing BertTokenizer
             params: Parameters
         """
-        self.data_dir = data_dir
-        self.batch_size = params.batch_size
-        self.max_len = params.max_len
-        self.device = params.device
-        self.seed = params.seed
-        self.workers_num = params.num_workers
+        self.params = params
         self.tags = ["O", "B-MISC", "I-MISC", "B-PER", "I-PER", "B-ORG", "I-ORG", "B-LOC", "I-LOC", "[CLS]", "[SEP]", "X"]
 
         self.tag2idx = {tag: idx for idx, tag in enumerate(self.tags)}
@@ -131,76 +115,59 @@ class DataLoader:
         params.tag2idx = self.tag2idx
         params.idx2tag = self.idx2tag
 
-        self.tokenizer = BertTokenizer.from_pretrained(bert_model_dir, do_lower_case=False)
+        self.tokenizer = tokenizer
+        self.datasets = self._load_data(os.path.join('data', params.dataset))
 
-    def _create_examples(self, lines, set_type):
-        examples = []
-        for i, (sentence, label) in enumerate(lines):
-            guid = "%s-%s" % (set_type, i)
-            text_a = ' '.join(sentence)
-            label = label
-            examples.append(InputExample(guid=guid, text=text_a, label=label))
-        return examples
+    def _load_data(self, data_dir):
+        """Load data from 'data_dir'"""
 
-    def _readfile(self, filename):
-        """Read a dataset file
+        data = defaultdict(list)
 
-        Args:
-            filename: (string) train.txt, val.txt or test.txt
+        # read data files
+        for data_type in ['train', 'val', 'test']:
+            with open(os.path.join(data_dir, data_type + '.txt'), 'r') as f:
+                sentence = []
+                label = []
+                for line in f:
+                    # if meets the end of a sentence, add it to data, and clear the cache
+                    if len(line) == 0 or line.startswith('-DOCSTART') or line[0] == "\n":
+                        if len(sentence) > 0:
+                            data[data_type].append((sentence, label))
+                            sentence = []
+                            label = []
+                        continue
+                    # if meets a token
+                    splits = line.split(' ')
+                    sentence.append(splits[0])
+                    label.append(splits[-1][:-1])
 
-        Return:
-            data: (list) (sentence, label) tuples
-        """
-        data = []
+                if len(sentence) > 0:
+                    data[data_type].append((sentence, label))
+                    sentence = []
+                    label = []
 
-        with open(filename, 'r') as f:
-            sentence = []
-            label = []
-            for line in f:
-                # if meets the end of a sentence, add it to data, and clear the cache
-                if len(line) == 0 or line.startswith('-DOCSTART') or line[0] == "\n":
-                    if len(sentence) > 0:
-                        data.append((sentence, label))
-                        sentence = []
-                        label = []
-                    continue
-                # if meets a token
-                splits = line.split(' ')
-                sentence.append(splits[0])
-                label.append(splits[-1][:-1])
+        datasets = {
+            'val': LDataset(data['val'], self.tokenizer, self.tag2idx, self.params.max_len),
+            'test': LDataset(data['test'], self.tokenizer, self.tag2idx, self.params.max_len)
+        }
+        train_size = self.params.train_size if self.params.train_size <= 1.0 else 1.0
+        train_size = int(train_size * len(data['train']))
+        labeled_data = data['train'][:train_size]
+        unlabeled_data = data['train'][train_size:]
+        datasets['unlabeled'] = UDataset(unlabeled_data, self.tokenizer, self.tag2idx, self.params.max_len)
+        if len(labeled_data) > 0:
+            datasets['train'] = LDataset(labeled_data, self.tokenizer, self.tag2idx, self.params.max_len)
 
-        if len(sentence) > 0:
-            data.append((sentence, label))
-            sentence = []
-            label = []
-        return data
+        return datasets
 
-    def load_data(self, data_type):
-        """Loads the data for each type in types from data_dir.
+    def create_iterator(self, data_type, shuffle=True):
+        """Create pytorch DataLoaders using datasets"""
 
-        Args:
-            data_type: (str) has one of 'train', 'val', 'test' depending on which data is required.
-        Returns:
-            data: (Dataset) an instance of pytorch Dataset class
-        """
-        if data_type in ['train', 'val', 'test']:
-            examples = self._create_examples(self._readfile(os.path.join(self.data_dir, data_type + ".txt")), data_type)
-            return Dataset(examples, self.tokenizer, self.tag2idx, self.max_len, self.device)
-        else:
-            raise ValueError("data type not in ['train', 'val', 'test']")
-
-    def data_iterator(self, dataset, shuffle=False):
-        """Create a pytorch DataLoader given a dataset
-
-        Args:
-            dataset: (data.Dataset) a pytorch Dataset class instance
-            shuffle: (bool) whether shuffle the dataset
-
-        Return:
-            an instance of pytorch DataLoader class
-        """
-        return data.DataLoader(
-            dataset=dataset,
-            batch_size=self.batch_size,
-            shuffle=shuffle
+        iterator = data.DataLoader(
+            dataset=self.dataset[data_type],
+            batch_size=self.params.batch_size,
+            shuffle=shuffle,
+            num_workers=self.params.num_workers
         )
+
+        return iterator
