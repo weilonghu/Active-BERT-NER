@@ -1,17 +1,24 @@
 {
+    "dataset": "conll",
+    "seed": 2019,
+    "restore_dir": null,
+    "multi_gpu": false,
+    "fp16": false,
+    "loss_scale": 0,
     "full_finetuning": true,
     "max_len": 128,
-
-    "learning_rate": 5e-5,
+    "bert_model_dir": "pretrained_bert_models",
+    "learning_rate": 5e-05,
     "weight_decay": 0.01,
     "clip_grad": 1.0,
-    "warmup_proportion": 0.1,
-    "adam_epsilon": 1e-8,
-
-    "batch_size": 1,
-    "epoch_num": 10,
-    "min_epoch_num": 5,
-    "patience": 0.02,
-    "patience_num": 5,
-    "num_workers": 1
+    "warmup_steps": 250,
+    "min_lr_ratio": 0.5,
+    "decay_steps": 1500,
+    "adam_epsilon": 1e-08,
+    "batch_size": 32,
+    "num_epoch": 1,
+    "num_workers": 0,
+    "train_size": 1,
+    "do_train": true,
+    "do_test": true
 }

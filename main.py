@@ -11,17 +11,16 @@ import torch
 import torch.nn as nn
 from torch.optim.lr_scheduler import LambdaLR
 from transformers.optimization import AdamW
-from transformers import BertTokenizer
-from tqdm import trange
+from tqdm import tqdm, trange
 from seqeval.metrics import f1_score, classification_report
 
-from sequence_tagger import BertOnlyForSequenceTagging as BertForSequenceTagging
+from model import BertOnlyForSequenceTagging as BertForSequenceTagging
 from data_loader import DataLoader
 import utils
 
 
 parser = argparse.ArgumentParser()
-parser.add_argument('--dataset', default='toy', help="Directory containing the dataset")
+parser.add_argument('--dataset', default='conll', help="Directory containing the dataset")
 parser.add_argument('--seed', type=int, default=2019, help="random seed for initialization")
 parser.add_argument('--restore_dir', default=None,
                     help="Optional, name of the directory containing weights to reload before training, e.g., 'experiments/conll/'")
@@ -31,18 +30,20 @@ parser.add_argument('--loss_scale', type=float, default=0,
                     help="Loss scaling to improve fp16 numeric stability. Only used when fp16 set to True.\n"
                     "0 (default value): dynamic loss scaling.\n"
                     "Positive power of 2: static loss scaling value.\n")
-parser.add_argument('--full_finetuning', action='store_true', help='BERT: If full finetuning bert model')
+parser.add_argument('--full_finetuning', action='store_false', help='BERT: If full finetuning bert model')
 parser.add_argument('--max_len', default=128, type=int, help='BERT: maximul sequence lenghth')
 parser.add_argument('--bert_model_dir', default='pretrained_bert_models', type=str, help='BERT: directory containing BERT model')
 parser.add_argument('--learning_rate', default=5e-5, type=float, help='Learning rate for the optimizer')
 parser.add_argument('--weight_decay', default=0.01, type=float, help='Weight decay for the optimizer')
 parser.add_argument('--clip_grad', default=1.0, type=float, help='Gradient clipping')
-parser.add_argument('--warmup_proportion', default=0.1, type=float, help='Warmup configuration for the optimizer')
+parser.add_argument('--warmup_steps', default=250, type=int, help='Warmup configuration for the optimizer')
+parser.add_argument('--min_lr_ratio', default=0.5, type=float, help='Minimum learning rate')
+parser.add_argument('--decay_steps', default=1500, type=int, help="Decay steps for LambdLR scheduler")
 parser.add_argument('--adam_epsilon', default=1e-8, type=float, help='Configuration for the optimizer')
 parser.add_argument('--batch_size', default=32, type=int, help='Batch size for training and testing')
-parser.add_argument('--num_epoch', default=10, type=int, help='Number of training epochs')
+parser.add_argument('--num_epoch', default=1, type=int, help='Number of training epochs')
 parser.add_argument('--num_workers', default=0, type=int, help='Number of workers for pytorch DataLoader')
-parser.add_argument('--train_size', default=0, type=float, help='Proportion of train dataset for initialized training')
+parser.add_argument('--train_size', default=1, type=float, help='Proportion of train dataset for initialized training')
 parser.add_argument('--do_train', action='store_false', help='If train the model')
 parser.add_argument('--do_test', action='store_false', help='If test the model')
 
@@ -52,13 +53,14 @@ def train(model, data_iterator, optimizer, params):
     # set model to training mode
     model.train()
 
-    logging.info('Train for {} epochs'.format(params.num_epoch))
-    # a running average object for loss
-    loss_avg = utils.RunningAverage()
+    tqdm_bar = trange(params.num_epoch)
+    for _ in tqdm_bar:
+        # a running average object for loss
+        loss_avg = utils.RunningAverage()
 
-    for _ in range(params.num_epoch):
         for batch in data_iterator:
             # fetch the next training batch
+            batch = [elem.to(params.device) for elem in batch]
             input_ids, label_ids, attention_mask, sentence_ids, label_mask = batch
 
             # compute model output and loss
@@ -79,12 +81,12 @@ def train(model, data_iterator, optimizer, params):
 
             # performs updates using calculated gradients
             optimizer.step()
-            scheduler.step()
             # clear previous gradients, compute gradients of all variables wrt loss
             model.zero_grad()
 
             # update the average loss
             loss_avg.update(loss.item())
+            tqdm_bar.set_postfix(loss='{:05.3f}'.format(loss_avg()))
 
     return loss_avg()
 
@@ -99,12 +101,9 @@ def evaluate(model, data_iterator, params, mark='Eval', verbose=False):
     true_tags = []
     pred_tags = []
 
-    # a running average object for loss
-    loss_avg = utils.RunningAverage()
-
-    one_epoch = trange(params.eval_steps)
-    for step, batch in zip(one_epoch, data_iterator):
+    for batch in tqdm(data_iterator):
         # fetch the next evaluation batch
+        batch = [elem.to(params.device) for elem in batch]
         input_ids, label_ids, attention_mask, sentence_ids, label_mask = batch
 
         with torch.no_grad():
@@ -112,7 +111,6 @@ def evaluate(model, data_iterator, params, mark='Eval', verbose=False):
                                          attention_mask=attention_mask, labels=label_ids, label_masks=label_mask)
         if params.n_gpu > 1 and params.multi_gpu:
             loss = loss.mean()
-        loss_avg.update(loss.item())
 
         batch_output = torch.argmax(F.log_softmax(logits, dim=2), dim=2)
         batch_output = batch_output.detach().cpu().numpy()
@@ -128,14 +126,11 @@ def evaluate(model, data_iterator, params, mark='Eval', verbose=False):
         true_tags.extend(batch_true_tags)
         pred_tags.extend(batch_pred_tags)
 
-        one_epoch.set_postfix(eval_loss='{:05.3f}'.format(loss_avg()))
-
     assert len(pred_tags) == len(true_tags)
 
     # logging loss, f1 and report
     metrics = {}
     f1 = f1_score(true_tags, pred_tags)
-    metrics['loss'] = loss_avg()
     metrics['f1'] = f1
     metrics_str = "; ".join("{}: {:05.2f}".format(k, v)
                             for k, v in metrics.items())
@@ -222,6 +217,10 @@ if __name__ == '__main__':
     utils.set_logger(os.path.join(model_dir, 'train.log'))
     logging.info("device: {}, n_gpu: {}, 16-bits training: {}".format(params.device, params.n_gpu, args.fp16))
 
+    # Create the input data pipeline
+    logging.info("Loading the datasets...")
+    data_loader = DataLoader(os.path.join('data', params.dataset), params.bert_model_dir, params)
+
     # Prepare model
     model = BertForSequenceTagging.from_pretrained(params.bert_model_dir, num_labels=len(params.tag2idx))
     model.to(params.device)
@@ -265,24 +264,19 @@ if __name__ == '__main__':
             optimizer = FP16_Optimizer(
                 optimizer, static_loss_scale=args.loss_scale)
     else:
-        # optimizer = AdamW(model.parameters(), lr=params.learning_rate, correct_bias=False)
         optimizer = AdamW(optimizer_grouped_parameters,
                           lr=params.learning_rate)
 
     # restore the model
     if params.restore_dir is not None:
         model = BertForSequenceTagging.from_pretrained(params.restore_dir)
-
-    # Create the input data pipeline
-    logging.info("Loading the datasets...")
-    tokenizer = BertTokenizer.from_pretrained(params.bert_model_dir, do_lower_case=False)
-    data_loader = DataLoader(tokenizer, params)
+        logging.info('Restore model from {}'.format(params.restore_dir))
 
     # Train and evaluate the model
     if params.do_train:
         if params.train_size > 0:
-            logging.info("Starting training for {} epoch(s)".format(params.epoch_num))
-            train_iter = data_loader.create_iterator('train')
+            logging.info("Starting training for {} epoch(s)".format(params.num_epoch))
+            train_iter = data_loader.data_iterator('train', shuffle=True)
             train(model, train_iter, optimizer, params)
 
         if params.train_size < 1:
@@ -291,5 +285,5 @@ if __name__ == '__main__':
 
     if params.do_test:
         logging.info('Starting testing the model...')
-        test_iter = data_loader.create_iterator('test', shuffle=False)
+        test_iter = data_loader.data_iterator('test', shuffle=False)
         evaluate(model, test_iter, params, mark='Test', verbose=True)
