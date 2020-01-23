@@ -144,3 +144,17 @@ class DataLoader:
             batch_size=self.params.batch_size,
             shuffle=shuffle
         )
+
+    def update_dataset(self, indices):
+        """Put data from unlabeled set to trani set"""
+
+        sample_data = [self.datasets['unlabeled'][i] for i in indices]
+        # put into train set
+        self.datasets['train'].data_list.extend(sample_data.copy())
+        # remove from unlabeled set
+        unlabeled_data = [v for i, v in enumerate(self.datasets['unlabeled']) if i not in frozenset(indices)]
+        self.datasets['unlabeled'] = unlabeled_data
+
+    def unlabled_length(self):
+
+        return len(self.datasets['unlabeled'].data_list)

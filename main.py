@@ -16,6 +16,7 @@ from seqeval.metrics import f1_score, classification_report
 
 from model import BertOnlyForSequenceTagging as BertForSequenceTagging
 from data_loader import DataLoader
+from strategy.strategy import Strategy
 import utils
 
 
@@ -41,11 +42,15 @@ parser.add_argument('--min_lr_ratio', default=0.5, type=float, help='Minimum lea
 parser.add_argument('--decay_steps', default=1500, type=int, help="Decay steps for LambdLR scheduler")
 parser.add_argument('--adam_epsilon', default=1e-8, type=float, help='Configuration for the optimizer')
 parser.add_argument('--batch_size', default=32, type=int, help='Batch size for training and testing')
+parser.add_argument('--num_query', default=100, type=int, help='Number of queried batches with active learning')
 parser.add_argument('--num_epoch', default=1, type=int, help='Number of training epochs')
 parser.add_argument('--num_workers', default=0, type=int, help='Number of workers for pytorch DataLoader')
 parser.add_argument('--train_size', default=1, type=float, help='Proportion of train dataset for initialized training')
 parser.add_argument('--do_train', action='store_false', help='If train the model')
 parser.add_argument('--do_test', action='store_false', help='If test the model')
+parser.add_argument('--eval_every', default=5, type=int, help='Evaluate the model every "eval_every" batchs')
+parser.add_argument('--incremental_train', action='store_true', help='When selecting a batch actively, if only train on the batch')
+parser.add_argument('--active_strategy', default='random_select', type=str, help='Strategy name used in active learning')
 
 
 def train(model, data_iterator, optimizer, params):
@@ -64,8 +69,9 @@ def train(model, data_iterator, optimizer, params):
             input_ids, label_ids, attention_mask, sentence_ids, label_mask = batch
 
             # compute model output and loss
-            loss = model(input_ids, token_type_ids=sentence_ids,
-                         attention_mask=attention_mask, labels=label_ids, label_masks=label_mask)[0]
+            logits = model(input_ids, token_type_ids=sentence_ids,
+                           attention_mask=attention_mask, label_masks=label_mask)
+            loss, _ = model.loss(logits=logits, labels=label_ids, label_masks=label_mask)
 
             if params.n_gpu > 1 and args.multi_gpu:
                 loss = loss.mean()  # mean() to average on multi-gpu
@@ -107,14 +113,15 @@ def evaluate(model, data_iterator, params, mark='Eval', verbose=False):
         input_ids, label_ids, attention_mask, sentence_ids, label_mask = batch
 
         with torch.no_grad():
-            loss, logits, labels = model(input_ids, token_type_ids=sentence_ids,
-                                         attention_mask=attention_mask, labels=label_ids, label_masks=label_mask)
+            logits = model(input_ids, token_type_ids=sentence_ids,
+                           attention_mask=attention_mask, label_masks=label_mask)
+            loss, labels = model.loss(logits=logits, labels=label_ids, label_masks=label_mask)
         if params.n_gpu > 1 and params.multi_gpu:
             loss = loss.mean()
 
         batch_output = torch.argmax(F.log_softmax(logits, dim=2), dim=2)
         batch_output = batch_output.detach().cpu().numpy()
-        batch_tags = labels.to('cpu').numpy()
+        batch_tags = labels.detach().cpu().numpy()
 
         batch_true_tags = [
             [idx2tag.get(idx) for idx in indices[np.where(indices != -1)]]
@@ -142,54 +149,66 @@ def evaluate(model, data_iterator, params, mark='Eval', verbose=False):
     return metrics
 
 
-def train_active(model, train_data, val_data, optimizer, scheduler, params, model_dir):
+def train_active(model, data_loader, optimizer, params, model_dir):
     """Train the model and evaluate every epoch."""
 
     best_val_f1 = 0.0
     patience_counter = 0
+    val_data_iterator = data_loader.data_iterator('val', shuffle=False)
+    strategy_func = Strategy().get_strategy_proxy(params.active_strategy)
 
-    for epoch in range(1, params.epoch_num + 1):
-        # Run one epoch
-        logging.info("Epoch {}/{}".format(epoch, params.epoch_num))
+    for query in range(1, params.num_query + 1):
 
-        # Compute number of batches in one epoch
-        params.train_steps = params.train_size // params.batch_size
-        params.val_steps = params.val_size // params.batch_size
+        num_unlabeled_data = data_loader.unlabled_length()
+        if num_unlabeled_data > 0:
+            # Predict probs of unlabeled data
+            unlabeled_logits = []
+            unlabeled_iter = data_loader.data_iterator('unlabeled', shuffle=False)
+            for batch in unlabeled_iter:
+                batch = [elem.to(params.device) for elem in batch]
+                input_ids, label_ids, attention_mask, sentence_ids, label_mask = batch
+                logits = model(input_ids, token_type_ids=sentence_ids,
+                               attention_mask=attention_mask, label_masks=label_mask)
+                unlabeled_logits.append(logits)
+            unlabeled_logits = torch.cat(unlabeled_logits, dim=0)
+            del unlabeled_iter
 
-        # data iterator for training
-        train_data_iterator = data_loader.data_iterator(
-            train_data, shuffle=True)
+            # Query a batch of unlabeled data, then put into train set
+            query_num = min(num_unlabeled_data, params.batch_size)
+            query_idx = strategy_func(unlabeled_logits, None, query_num)
+            data_loader.update_dataset(query_idx)
 
-        # Train for one epoch on training set
-        train(model, train_data_iterator, optimizer, scheduler, params)
-
-        # data iterator for evaluation
-        # train_data_iterator = data_loader.data_iterator(train_data, shuffle=False)
-        val_data_iterator = data_loader.data_iterator(val_data, shuffle=False)
-
-        # Evaluate for one epoch on training set and validation set
-        # params.eval_steps = params.train_steps
-        # train_metrics = evaluate(model, train_data_iterator, params, mark='Train')
-        params.eval_steps = params.val_steps
-        val_metrics = evaluate(model, val_data_iterator, params, mark='Val')
-
-        val_f1 = val_metrics['f1']
-        improve_f1 = val_f1 - best_val_f1
-        if improve_f1 > 0:
-            logging.info("- Found new best F1")
-            best_val_f1 = val_f1
-            model.save_pretrained(model_dir)
-            if improve_f1 < params.patience:
-                patience_counter += 1
-            else:
-                patience_counter = 0
+        # Train on new training data
+        if params.incremental_train and num_unlabeled_data > 0:
+            query_data = []
+            for idx in query_idx:
+                query_data.append(data_loader.datasets['unlabeled'].get(idx))
+            train_iter = iter(query_data)
         else:
-            patience_counter += 1
+            train_iter = data_loader.data_iterator('train', shuffle=True)
+        train(model, train_iter, optimizer, params)
 
-        # Early stopping and logging best f1
-        if (patience_counter >= params.patience_num and epoch > params.min_epoch_num) or epoch == params.epoch_num:
-            logging.info("Best val f1: {:05.2f}".format(best_val_f1))
-            break
+        # Evaluate for val dataset, perform early stopping
+        if query % params.eval_every:
+            val_metrics = evaluate(model, val_data_iterator, params, mark='Val')
+
+            val_f1 = val_metrics['f1']
+            improve_f1 = val_f1 - best_val_f1
+            if improve_f1 > 0:
+                logging.info("- Found new best F1")
+                best_val_f1 = val_f1
+                model.save_pretrained(model_dir)
+                if improve_f1 < params.patience:
+                    patience_counter += 1
+                else:
+                    patience_counter = 0
+            else:
+                patience_counter += 1
+
+            # Early stopping and logging best f1
+            if (patience_counter >= params.patience_num and query > params.min_epoch_num) or query == params.epoch_num:
+                logging.info("Early stop, Best val f1: {:05.2f}".format(best_val_f1))
+                break
 
 
 if __name__ == '__main__':
@@ -278,6 +297,7 @@ if __name__ == '__main__':
             logging.info("Starting training for {} epoch(s)".format(params.num_epoch))
             train_iter = data_loader.data_iterator('train', shuffle=True)
             train(model, train_iter, optimizer, params)
+            del train_iter
 
         if params.train_size < 1:
             logging.info('Start training using active learning...')

@@ -16,9 +16,12 @@
     "decay_steps": 1500,
     "adam_epsilon": 1e-08,
     "batch_size": 32,
+    "num_query": 100,
     "num_epoch": 1,
     "num_workers": 0,
     "train_size": 1,
     "do_train": true,
-    "do_test": true
+    "do_test": true,
+    "eval_every": 5,
+    "incremental_train": false
 }
