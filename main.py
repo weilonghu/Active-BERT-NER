@@ -33,7 +33,7 @@ parser.add_argument('--loss_scale', type=float, default=0,
                     "Positive power of 2: static loss scaling value.\n")
 parser.add_argument('--full_finetuning', action='store_false', help='BERT: If full finetuning bert model')
 parser.add_argument('--max_len', default=128, type=int, help='BERT: maximul sequence lenghth')
-parser.add_argument('--bert_model_dir', default='pretrained_bert_models', type=str, help='BERT: directory containing BERT model')
+parser.add_argument('--bert_model_dir', default='pretrained_bert_models/bert_base_cased', type=str, help='BERT: directory containing BERT model')
 parser.add_argument('--learning_rate', default=5e-5, type=float, help='Learning rate for the optimizer')
 parser.add_argument('--weight_decay', default=0.01, type=float, help='Weight decay for the optimizer')
 parser.add_argument('--clip_grad', default=1.0, type=float, help='Gradient clipping')
@@ -41,14 +41,17 @@ parser.add_argument('--warmup_steps', default=250, type=int, help='Warmup config
 parser.add_argument('--min_lr_ratio', default=0.5, type=float, help='Minimum learning rate')
 parser.add_argument('--decay_steps', default=1500, type=int, help="Decay steps for LambdLR scheduler")
 parser.add_argument('--adam_epsilon', default=1e-8, type=float, help='Configuration for the optimizer')
+parser.add_argument('--patience', default=0.001, type=float, help='Increasement between two epochs')
+parser.add_argument('--patience_num', default=30, type=int, help='Early stopping creteria')
 parser.add_argument('--batch_size', default=32, type=int, help='Batch size for training and testing')
-parser.add_argument('--num_query', default=100, type=int, help='Number of queried batches with active learning')
+parser.add_argument('--max_query_num', default=60, type=int, help='Maximum number of queried batches with active learning')
+parser.add_argument('--min_query_num', default=20, type=int, help='Minimum number of queried batches with active learning')
 parser.add_argument('--num_epoch', default=1, type=int, help='Number of training epochs')
 parser.add_argument('--num_workers', default=0, type=int, help='Number of workers for pytorch DataLoader')
-parser.add_argument('--train_size', default=1, type=float, help='Proportion of train dataset for initialized training')
+parser.add_argument('--train_size', default=0, type=float, help='Proportion of train dataset for initialized training')
 parser.add_argument('--do_train', action='store_false', help='If train the model')
 parser.add_argument('--do_test', action='store_false', help='If test the model')
-parser.add_argument('--eval_every', default=5, type=int, help='Evaluate the model every "eval_every" batchs')
+parser.add_argument('--eval_every', default=2, type=int, help='Evaluate the model every "eval_every" batchs')
 parser.add_argument('--incremental_train', action='store_true', help='When selecting a batch actively, if only train on the batch')
 parser.add_argument('--active_strategy', default='random_select', type=str, help='Strategy name used in active learning')
 
@@ -58,8 +61,7 @@ def train(model, data_iterator, optimizer, params):
     # set model to training mode
     model.train()
 
-    tqdm_bar = trange(params.num_epoch)
-    for _ in tqdm_bar:
+    for _ in range(params.num_epoch):
         # a running average object for loss
         loss_avg = utils.RunningAverage()
 
@@ -69,8 +71,7 @@ def train(model, data_iterator, optimizer, params):
             input_ids, label_ids, attention_mask, sentence_ids, label_mask = batch
 
             # compute model output and loss
-            logits = model(input_ids, token_type_ids=sentence_ids,
-                           attention_mask=attention_mask, label_masks=label_mask)
+            logits = model(input_ids, token_type_ids=sentence_ids, attention_mask=attention_mask, label_masks=label_mask)
             loss, _ = model.loss(logits=logits, labels=label_ids, label_masks=label_mask)
 
             if params.n_gpu > 1 and args.multi_gpu:
@@ -92,7 +93,6 @@ def train(model, data_iterator, optimizer, params):
 
             # update the average loss
             loss_avg.update(loss.item())
-            tqdm_bar.set_postfix(loss='{:05.3f}'.format(loss_avg()))
 
     return loss_avg()
 
@@ -107,14 +107,14 @@ def evaluate(model, data_iterator, params, mark='Eval', verbose=False):
     true_tags = []
     pred_tags = []
 
-    for batch in tqdm(data_iterator):
+    for batch in data_iterator:
         # fetch the next evaluation batch
         batch = [elem.to(params.device) for elem in batch]
         input_ids, label_ids, attention_mask, sentence_ids, label_mask = batch
 
         with torch.no_grad():
             logits = model(input_ids, token_type_ids=sentence_ids,
-                           attention_mask=attention_mask, label_masks=label_mask)
+                              attention_mask=attention_mask, label_masks=label_mask)
             loss, labels = model.loss(logits=logits, labels=label_ids, label_masks=label_mask)
         if params.n_gpu > 1 and params.multi_gpu:
             loss = loss.mean()
@@ -141,7 +141,7 @@ def evaluate(model, data_iterator, params, mark='Eval', verbose=False):
     metrics['f1'] = f1
     metrics_str = "; ".join("{}: {:05.2f}".format(k, v)
                             for k, v in metrics.items())
-    logging.info("- {} metrics: ".format(mark) + metrics_str)
+    tqdm.write("- {} metrics: ".format(mark) + metrics_str)
 
     if verbose:
         report = classification_report(true_tags, pred_tags)
@@ -157,39 +157,45 @@ def train_active(model, data_loader, optimizer, params, model_dir):
     val_data_iterator = data_loader.data_iterator('val', shuffle=False)
     strategy_func = Strategy().get_strategy_proxy(params.active_strategy)
 
-    for query in range(1, params.num_query + 1):
+    for query in range(1, params.max_query_num + 1):
 
         num_unlabeled_data = data_loader.unlabled_length()
         if num_unlabeled_data > 0:
             # Predict probs of unlabeled data
-            unlabeled_logits = []
+            unlabeled_scores = []  # each batch has different size
             unlabeled_iter = data_loader.data_iterator('unlabeled', shuffle=False)
-            for batch in unlabeled_iter:
-                batch = [elem.to(params.device) for elem in batch]
-                input_ids, label_ids, attention_mask, sentence_ids, label_mask = batch
-                logits = model(input_ids, token_type_ids=sentence_ids,
-                               attention_mask=attention_mask, label_masks=label_mask)
-                unlabeled_logits.append(logits)
-            unlabeled_logits = torch.cat(unlabeled_logits, dim=0)
+            with torch.no_grad():
+                for batch in unlabeled_iter:
+                    batch = [elem.to(params.device) for elem in batch]
+                    input_ids, label_ids, attention_mask, sentence_ids, label_mask = batch
+                    logits = model(input_ids, token_type_ids=sentence_ids,
+                                   attention_mask=attention_mask, label_masks=label_mask)
+                    _, labels = model.loss(logits=logits, labels=label_ids, label_masks=label_mask)
+                    unlabeled_scores.append((logits.cpu().detach(), labels.cpu().detach()))
             del unlabeled_iter
 
             # Query a batch of unlabeled data, then put into train set
             query_num = min(num_unlabeled_data, params.batch_size)
-            query_idx = strategy_func(unlabeled_logits, None, query_num)
-            data_loader.update_dataset(query_idx)
+            query_idx = strategy_func(unlabeled_scores, num_unlabeled_data, query_num)
+            data_loader.update_train(query_idx)
 
         # Train on new training data
         if params.incremental_train and num_unlabeled_data > 0:
             query_data = []
             for idx in query_idx:
-                query_data.append(data_loader.datasets['unlabeled'].get(idx))
-            train_iter = iter(query_data)
+                query_data.append(data_loader.datasets['unlabeled'][idx])
+            sample_data = [[query_data[r][c] for r in range(len(query_data))] for c in range(len(query_data[0]))]
+            sample_data = [torch.stack(t) for t in sample_data]
+            train_iter = iter([sample_data])
         else:
             train_iter = data_loader.data_iterator('train', shuffle=True)
         train(model, train_iter, optimizer, params)
+        data_loader.update_unlabeled(query_idx)
+        del train_iter
 
         # Evaluate for val dataset, perform early stopping
-        if query % params.eval_every:
+        if query % params.eval_every == 0:
+            logging.info('\n-Evaluate at query {}, {} train examples'.format(query, data_loader.train_length()))
             val_metrics = evaluate(model, val_data_iterator, params, mark='Val')
 
             val_f1 = val_metrics['f1']
@@ -206,7 +212,7 @@ def train_active(model, data_loader, optimizer, params, model_dir):
                 patience_counter += 1
 
             # Early stopping and logging best f1
-            if (patience_counter >= params.patience_num and query > params.min_epoch_num) or query == params.epoch_num:
+            if (patience_counter >= params.patience_num and query > params.min_query_num):
                 logging.info("Early stop, Best val f1: {:05.2f}".format(best_val_f1))
                 break
 
@@ -294,16 +300,16 @@ if __name__ == '__main__':
     # Train and evaluate the model
     if params.do_train:
         if params.train_size > 0:
-            logging.info("Starting training for {} epoch(s)".format(params.num_epoch))
+            logging.info("\n>> Starting training for {} epoch(s)".format(params.num_epoch))
             train_iter = data_loader.data_iterator('train', shuffle=True)
             train(model, train_iter, optimizer, params)
             del train_iter
 
         if params.train_size < 1:
-            logging.info('Start training using active learning...')
+            logging.info('\n>> Start training using strategy {}...'.format(params.active_strategy))
             train_active(model, data_loader, optimizer, params, model_dir)
 
     if params.do_test:
-        logging.info('Starting testing the model...')
+        logging.info('\n>> Starting testing the model...')
         test_iter = data_loader.data_iterator('test', shuffle=False)
         evaluate(model, test_iter, params, mark='Test', verbose=True)

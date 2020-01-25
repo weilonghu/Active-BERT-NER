@@ -1,5 +1,5 @@
-from uncertainty_sampling import token_entropy
-from uncertainty_sampling import random_select
+from strategy.uncertainty_sampling import token_entropy
+from strategy.uncertainty_sampling import random_select
 
 
 class Strategy(object):

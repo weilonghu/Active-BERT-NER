@@ -1,23 +1,26 @@
 import os
 import torch
 import random
+import logging
+import numpy as np
 from collections import defaultdict
 from torch.utils import data
 from transformers import BertTokenizer
 
 
 class Dataset(data.Dataset):
-    def __init__(self, data_list, tokenizer, label_map, max_len):
+    def __init__(self, data_list, data_ids, tokenizer, label_map, max_len):
         self.max_len = max_len
         self.label_map = label_map
         self.data_list = data_list
+        self.data_ids = data_ids
         self.tokenizer = tokenizer
 
     def __len__(self):
-        return len(self.data_list)
+        return len(self.data_ids)
 
     def __getitem__(self, idx):
-        text, label = self.data_list[idx]
+        text, label = self.data_list[self.data_ids[idx]]
 
         return self._get_feature(text, label)
 
@@ -86,14 +89,14 @@ class Dataset(data.Dataset):
         input_ids, label_ids, label_mask = torch.LongTensor(input_ids), torch.LongTensor(label_ids), torch.BoolTensor(label_mask)
         attention_mask, sentence_id = torch.LongTensor(attention_mask), torch.LongTensor(sentence_id)
 
-        return input_ids, label_ids, attention_mask, sentence_id, label_mask
+        return [input_ids, label_ids, attention_mask, sentence_id, label_mask]
 
 
 class DataLoader:
     def __init__(self, data_dir, bert_model_dir, params):
         self.data_dir = data_dir
         self.params = params
-        self.tags = ["O", "B-MISC", "I-MISC", "B-PER", "I-PER", "B-ORG", "I-ORG", "B-LOC", "I-LOC", "[CLS]", "[SEP]", "X"]
+        self.tags = self._load_tags() + ['[CLS]', '[SEP]', 'X']
 
         self.tag2idx = {tag: idx for idx, tag in enumerate(self.tags)}
         self.idx2tag = {idx: tag for idx, tag in enumerate(self.tags)}
@@ -102,59 +105,72 @@ class DataLoader:
 
         self.tokenizer = BertTokenizer.from_pretrained(bert_model_dir, do_lower_case=False)
 
-        self._load_data()
+        self._load_sentence_and_tag()
 
-    def _load_data(self):
+    def _load_tags(self):
+        tags = []
+        file_path = os.path.join(self.data_dir, 'tags.txt')
+        with open(file_path, 'r') as file:
+            for tag in file:
+                tags.append(tag.strip())
+        return tags
+
+    def _load_sentence_and_tag(self):
         data = defaultdict(list)
 
         # Read all files
         for data_type in ['train', 'val', 'test']:
-            with open(os.path.join(self.data_dir, data_type + '.txt'), 'r') as f:
-                sentence = []
-                label = []
-                for line in f:
-                    if len(line) == 0 or line.startswith('-DOCSTART') or line[0] == "\n":
-                        if len(sentence) > 0:
-                            data[data_type].append((sentence, label))
-                            sentence = []
-                            label = []
-                        continue
-                    splits = line.split(' ')
-                    sentence.append(splits[0])
-                    label.append(splits[-1][:-1])
+            sentences = [line.strip() for line in open(os.path.join(self.data_dir, data_type, 'sentences.txt'), 'r')]
+            tags = [line.strip() for line in open(os.path.join(self.data_dir, data_type, 'tags.txt'), 'r')]
+            assert len(sentences) == len(tags)
 
-                if len(sentence) > 0:
-                    data[data_type].append((sentence, label))
-                    sentence = []
-                    label = []
+            for sentence, tag in zip(sentences, tags):
+                sentence, tag = sentence.split(), tag.split()
+                assert len(sentence) == len(tag)
+                data[data_type].append((sentence, tag))
+                
         # Generate initialized train set and unlabeled set
         train_size = int(self.params.train_size * len(data['train']))
-        train_data = random.choices(data['train'], k=train_size)
+
+        data_list = data['train'] + data['val'] + data['test']
+        unlabeled_ids = np.arange(len(data['train']))
+        val_ids = len(unlabeled_ids) + np.arange(len(data['val']))
+        test_ids = len(unlabeled_ids) + len(val_ids) + np.arange(len(data['test']))
+        train_ids = np.random.choice(unlabeled_ids, train_size)
 
         self.datasets = {
-            'train': Dataset(train_data, self.tokenizer, self.tag2idx, self.params.max_len),
-            'val': Dataset(data['val'], self.tokenizer, self.tag2idx, self.params.max_len),
-            'test': Dataset(data['test'], self.tokenizer, self.tag2idx, self.params.max_len),
-            'unlabeled': Dataset(data['train'], self.tokenizer, self.tag2idx, self.params.max_len)
+            'train': Dataset(data_list, train_ids, self.tokenizer, self.tag2idx, self.params.max_len),
+            'val': Dataset(data_list, val_ids, self.tokenizer, self.tag2idx, self.params.max_len),
+            'test': Dataset(data_list, test_ids, self.tokenizer, self.tag2idx, self.params.max_len),
+            'unlabeled': Dataset(data_list, unlabeled_ids, self.tokenizer, self.tag2idx, self.params.max_len)
         }
+
+        logging.info('Dataset Info: train={}, val={}, test={}, unlabeled={}'.format(
+            len(train_ids), len(val_ids), len(test_ids), len(unlabeled_ids)
+        ))
 
     def data_iterator(self, data_type, shuffle=False):
         return data.DataLoader(
             dataset=self.datasets[data_type],
             batch_size=self.params.batch_size,
-            shuffle=shuffle
+            shuffle=shuffle,
+            num_workers=self.params.num_workers
         )
 
-    def update_dataset(self, indices):
+    def update_train(self, indices):
         """Put data from unlabeled set to trani set"""
 
-        sample_data = [self.datasets['unlabeled'][i] for i in indices]
-        # put into train set
-        self.datasets['train'].data_list.extend(sample_data.copy())
-        # remove from unlabeled set
-        unlabeled_data = [v for i, v in enumerate(self.datasets['unlabeled']) if i not in frozenset(indices)]
-        self.datasets['unlabeled'] = unlabeled_data
+        sample_data_ids = self.datasets['unlabeled'].data_ids[indices]
+        self.datasets['train'].data_ids = np.concatenate((self.datasets['train'].data_ids, sample_data_ids), axis=0)
+
+    def update_unlabeled(self, indices):
+
+        self.datasets['unlabeled'].data_ids = np.delete(self.datasets['unlabeled'].data_ids, indices)
 
     def unlabled_length(self):
 
-        return len(self.datasets['unlabeled'].data_list)
+        return len(self.datasets['unlabeled'].data_ids)
+
+    def train_length(self):
+
+        return len(self.datasets['train'].data_ids)

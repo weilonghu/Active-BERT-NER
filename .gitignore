@@ -114,3 +114,8 @@ pretrained_bert_models/vocab.txt
 experiments/toy/params.json
 experiments/conll/params.json
 experiments/conll/params.json
+experiments/conll/params.json
+experiments/conll/params.json
+pretrained_bert_models/bert_base_cased/pytorch_model.bin
+pretrained_bert_models/bert_base_cased/vocab.txt
+experiments/conll/params.json
