@@ -5,7 +5,6 @@ import random
 import logging
 import os
 import numpy as np
-import torch.nn.functional as F
 
 import torch
 import torch.nn as nn
@@ -14,9 +13,9 @@ from transformers.optimization import AdamW
 from tqdm import tqdm, trange
 from seqeval.metrics import f1_score, classification_report
 
-from model import BertOnlyForSequenceTagging as BertForSequenceTagging
+from model import BertForSequenceTagging
 from data_loader import DataLoader
-from strategy.strategy import Strategy
+from strategy import ActiveStrategy
 import utils
 
 
@@ -34,7 +33,7 @@ parser.add_argument('--loss_scale', type=float, default=0,
 parser.add_argument('--full_finetuning', action='store_false', help='BERT: If full finetuning bert model')
 parser.add_argument('--max_len', default=128, type=int, help='BERT: maximul sequence lenghth')
 parser.add_argument('--bert_model_dir', default='pretrained_bert_models/bert_base_cased', type=str, help='BERT: directory containing BERT model')
-parser.add_argument('--learning_rate', default=5e-5, type=float, help='Learning rate for the optimizer')
+parser.add_argument('--learning_rate', default=1e-5, type=float, help='Learning rate for the optimizer')
 parser.add_argument('--weight_decay', default=0.01, type=float, help='Weight decay for the optimizer')
 parser.add_argument('--clip_grad', default=1.0, type=float, help='Gradient clipping')
 parser.add_argument('--warmup_steps', default=250, type=int, help='Warmup configuration for the optimizer')
@@ -51,9 +50,10 @@ parser.add_argument('--num_workers', default=0, type=int, help='Number of worker
 parser.add_argument('--train_size', default=0, type=float, help='Proportion of train dataset for initialized training')
 parser.add_argument('--do_train', action='store_false', help='If train the model')
 parser.add_argument('--do_test', action='store_false', help='If test the model')
-parser.add_argument('--eval_every', default=2, type=int, help='Evaluate the model every "eval_every" batchs')
+parser.add_argument('--eval_every', default=1, type=int, help='Evaluate the model every "eval_every" batchs')
+parser.add_argument('--log_every', default=50, type=int, help='Print log every "log_every" batchs')
 parser.add_argument('--incremental_train', action='store_true', help='When selecting a batch actively, if only train on the batch')
-parser.add_argument('--active_strategy', default='random_select', type=str, help='Strategy name used in active learning')
+parser.add_argument('--active_strategy', default='least_confidence', type=str, help='Strategy name used in active learning')
 
 
 def train(model, data_iterator, optimizer, params):
@@ -61,18 +61,19 @@ def train(model, data_iterator, optimizer, params):
     # set model to training mode
     model.train()
 
-    for _ in range(params.num_epoch):
+    for epoch in range(params.num_epoch):
         # a running average object for loss
         loss_avg = utils.RunningAverage()
 
-        for batch in data_iterator:
+        for step, batch in enumerate(data_iterator):
             # fetch the next training batch
             batch = [elem.to(params.device) for elem in batch]
             input_ids, label_ids, attention_mask, sentence_ids, label_mask = batch
 
             # compute model output and loss
-            logits = model(input_ids, token_type_ids=sentence_ids, attention_mask=attention_mask, label_masks=label_mask)
-            loss, _ = model.loss(logits=logits, labels=label_ids, label_masks=label_mask)
+            logits, padded_labels = model(input_ids, token_type_ids=sentence_ids,
+                                          attention_mask=attention_mask, label_ids=label_ids, label_masks=label_mask)
+            loss = model.loss(logits=logits, labels=padded_labels)
 
             if params.n_gpu > 1 and args.multi_gpu:
                 loss = loss.mean()  # mean() to average on multi-gpu
@@ -94,6 +95,9 @@ def train(model, data_iterator, optimizer, params):
             # update the average loss
             loss_avg.update(loss.item())
 
+            if (step + 1) % params.log_every == 0:
+                logging.info('Training epoch={}, step={}, loss={:.4f}'.format(epoch + 1, step + 1, loss_avg()))
+
     return loss_avg()
 
 
@@ -113,13 +117,12 @@ def evaluate(model, data_iterator, params, mark='Eval', verbose=False):
         input_ids, label_ids, attention_mask, sentence_ids, label_mask = batch
 
         with torch.no_grad():
-            logits = model(input_ids, token_type_ids=sentence_ids,
-                              attention_mask=attention_mask, label_masks=label_mask)
-            loss, labels = model.loss(logits=logits, labels=label_ids, label_masks=label_mask)
+            logits, labels = model(input_ids, token_type_ids=sentence_ids, attention_mask=attention_mask,
+                                   label_ids=label_ids, label_masks=label_mask)
+            batch_output = model.predict(logits, labels)[0]
         if params.n_gpu > 1 and params.multi_gpu:
             loss = loss.mean()
 
-        batch_output = torch.argmax(F.log_softmax(logits, dim=2), dim=2)
         batch_output = batch_output.detach().cpu().numpy()
         batch_tags = labels.detach().cpu().numpy()
 
@@ -155,29 +158,44 @@ def train_active(model, data_loader, optimizer, params, model_dir):
     best_val_f1 = 0.0
     patience_counter = 0
     val_data_iterator = data_loader.data_iterator('val', shuffle=False)
-    strategy_func = Strategy().get_strategy_proxy(params.active_strategy)
+    strategy = ActiveStrategy(num_labels=len(params.tag2idx))
 
     for query in range(1, params.max_query_num + 1):
 
         num_unlabeled_data = data_loader.unlabled_length()
         if num_unlabeled_data > 0:
-            # Predict probs of unlabeled data
-            unlabeled_scores = []  # each batch has different size
+            # Collect infomation of unlabeled data, but each batch has diferent size
+            unlabel_logits = []
+            unlabel_masks = []
+            unlabel_confidences = []
             unlabeled_iter = data_loader.data_iterator('unlabeled', shuffle=False)
             with torch.no_grad():
                 for batch in unlabeled_iter:
                     batch = [elem.to(params.device) for elem in batch]
                     input_ids, label_ids, attention_mask, sentence_ids, label_mask = batch
-                    logits = model(input_ids, token_type_ids=sentence_ids,
-                                   attention_mask=attention_mask, label_masks=label_mask)
-                    _, labels = model.loss(logits=logits, labels=label_ids, label_masks=label_mask)
-                    unlabeled_scores.append((logits.cpu().detach(), labels.cpu().detach()))
+                    logits, padded_labels = model(input_ids, token_type_ids=sentence_ids,
+                                                  attention_mask=attention_mask,
+                                                  label_ids=label_ids, label_masks=label_mask)
+                    confidence = model.predict(logits=logits, labels=padded_labels)[1]
+
+                    unlabel_logits.append(logits.cpu().detach())
+                    unlabel_masks.append((padded_labels != -1).cpu().detach())
+                    unlabel_confidences.append(confidence.cpu().detach())
             del unlabeled_iter
 
             # Query a batch of unlabeled data, then put into train set
             query_num = min(num_unlabeled_data, params.batch_size)
-            query_idx = strategy_func(unlabeled_scores, num_unlabeled_data, query_num)
+            query_idx = strategy.sample_batch(
+                strategy_name=params.active_strategy,
+                query_num=query_num,
+                num_unlabeled=num_unlabeled_data,
+                logitss=unlabel_logits,
+                masks=unlabel_masks,
+                confidences=unlabel_confidences
+            )
             data_loader.update_train(query_idx)
+        else:
+            logging('No unlabeled data')
 
         # Train on new training data
         if params.incremental_train and num_unlabeled_data > 0:
