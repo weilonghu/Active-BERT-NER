@@ -13,7 +13,6 @@ from transformers.optimization import AdamW
 from tqdm import tqdm, trange
 from seqeval.metrics import f1_score, classification_report
 
-from model import BertForSequenceTagging
 from data_loader import DataLoader
 from strategy import ActiveStrategy
 import utils
@@ -54,6 +53,7 @@ parser.add_argument('--eval_every', default=1, type=int, help='Evaluate the mode
 parser.add_argument('--log_every', default=50, type=int, help='Print log every "log_every" batchs')
 parser.add_argument('--incremental_train', action='store_true', help='When selecting a batch actively, if only train on the batch')
 parser.add_argument('--active_strategy', default='least_confidence', type=str, help='Strategy name used in active learning')
+parser.add_argument('--use_crf', action='store_true', help='If stack crf layer on BERT model')
 
 
 def train(model, data_iterator, optimizer, params):
@@ -156,6 +156,7 @@ def train_active(model, data_loader, optimizer, params, model_dir):
     """Train the model and evaluate every epoch."""
 
     best_val_f1 = 0.0
+    val_f1_track = []
     patience_counter = 0
     val_data_iterator = data_loader.data_iterator('val', shuffle=False)
     strategy = ActiveStrategy(num_labels=len(params.tag2idx))
@@ -217,6 +218,7 @@ def train_active(model, data_loader, optimizer, params, model_dir):
             val_metrics = evaluate(model, val_data_iterator, params, mark='Val')
 
             val_f1 = val_metrics['f1']
+            val_f1_track.append(val_f1)
             improve_f1 = val_f1 - best_val_f1
             if improve_f1 > 0:
                 logging.info("- Found new best F1")
@@ -233,6 +235,11 @@ def train_active(model, data_loader, optimizer, params, model_dir):
             if (patience_counter >= params.patience_num and query > params.min_query_num):
                 logging.info("Early stop, Best val f1: {:05.2f}".format(best_val_f1))
                 break
+
+    if len(val_f1_track) > 0:
+        ndarray_file = os.path.join(model_dir, params.active_strategy)
+        np.save(ndarray_file, np.array(val_f1_track))
+        logging.info('Save val f1 track in {}'.format(ndarray_file))
 
 
 if __name__ == '__main__':
@@ -265,6 +272,11 @@ if __name__ == '__main__':
     data_loader = DataLoader(os.path.join('data', params.dataset), params.bert_model_dir, params)
 
     # Prepare model
+    if params.use_crf is True:
+        logging.info('Use CRF layer on BERT')
+        from model import BertCRFForSequenceTagging as BertForSequenceTagging
+    else:
+        from model import BertForSequenceTagging
     model = BertForSequenceTagging.from_pretrained(params.bert_model_dir, num_labels=len(params.tag2idx))
     model.to(params.device)
     if args.fp16:

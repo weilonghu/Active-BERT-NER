@@ -28,5 +28,6 @@
     "eval_every": 1,
     "log_every": 50,
     "incremental_train": false,
-    "active_strategy": "least_confidence"
+    "active_strategy": "least_confidence",
+    "use_crf": false
 }

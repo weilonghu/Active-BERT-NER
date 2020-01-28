@@ -46,10 +46,13 @@ class BertForSequenceTagging(BertForTokenClassification):
 
         return loss
 
-    def predict(self, logits, labels=None):
+    def predict(self, logits, labels):
 
         max_probs, output = torch.max(F.log_softmax(logits, dim=2), dim=2)
-        confidence = torch.prod(max_probs, dim=1)
+
+        mask = (labels != -1).float()
+        reverse_mask = (labels == -1).float()
+        confidence = torch.prod(max_probs * mask + reverse_mask, dim=1)
 
         return (output, confidence)
 

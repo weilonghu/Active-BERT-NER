@@ -25,7 +25,7 @@ class ActiveStrategy(object):
     def token_entropy_sample(self, query_num, logitss, masks, **kwargs):
 
         token_entropy = []
-        for logits, mask in zip(logitss, original_masks):
+        for logits, mask in zip(logitss, masks):
             origin_num = logits.size(0)
             categorical = Categorical(logits=logits.view(-1, self.num_labels))
             entropy = categorical.entropy() * mask.view(-1)

@@ -118,3 +118,5 @@ experiments/conll/config.json
 pretrained_bert_models/bert_base_chinese/vocab.txt
 pretrained_bert_models/bert_base_chinese/pytorch_model.bin
 experiments/msra/pytorch_model.bin
+*.npy
+*.png
