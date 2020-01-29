@@ -10,6 +10,22 @@ class ActiveStrategy(object):
         self.num_labels = num_labels
         self.support_strategies = ['random_select', 'token_entropy', 'least_confidence']
 
+        self.label_map = {
+            'random_select': 'Random',
+            'least_confidence': 'Least',
+            'token_entropy': 'Entropy',
+            'random_select_crf': 'Random+CRF',
+            'least_confidence_crf': 'Least+CRF',
+            'token_entropy_crf': 'Entropy+CRF'
+        }
+
+    def get_strategy_label(self, strategy_name, use_crf):
+
+        if use_crf is True:
+            strategy_name = '{}_crf'.format(strategy_name)
+
+        return self.label_map[strategy_name]
+
     def sample_batch(self, strategy_name, query_num, **kwargs):
 
         if strategy_name not in self.support_strategies:
@@ -36,7 +52,6 @@ class ActiveStrategy(object):
         token_entropy = torch.cat(token_entropy, dim=0)
 
         return token_entropy
-
 
     def random_select_sample(self, query_num, num_unlabeled, **kwargs):
 

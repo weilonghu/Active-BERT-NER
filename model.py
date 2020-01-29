@@ -50,9 +50,9 @@ class BertForSequenceTagging(BertForTokenClassification):
 
         max_probs, output = torch.max(F.log_softmax(logits, dim=2), dim=2)
 
-        mask = (labels != -1).float()
+        lens = torch.sum((labels != -1).float(), dim=1)
         reverse_mask = (labels == -1).float()
-        confidence = torch.prod(max_probs * mask + reverse_mask, dim=1)
+        confidence = torch.sum(torch.log(max_probs + reverse_mask), dim=1) + lens
 
         return (output, confidence)
 

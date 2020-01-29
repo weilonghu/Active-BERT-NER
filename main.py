@@ -10,7 +10,6 @@ import torch
 import torch.nn as nn
 from torch.optim.lr_scheduler import LambdaLR
 from transformers.optimization import AdamW
-from tqdm import tqdm, trange
 from seqeval.metrics import f1_score, classification_report
 
 from data_loader import DataLoader
@@ -120,8 +119,6 @@ def evaluate(model, data_iterator, params, mark='Eval', verbose=False):
             logits, labels = model(input_ids, token_type_ids=sentence_ids, attention_mask=attention_mask,
                                    label_ids=label_ids, label_masks=label_mask)
             batch_output = model.predict(logits, labels)[0]
-        if params.n_gpu > 1 and params.multi_gpu:
-            loss = loss.mean()
 
         batch_output = batch_output.detach().cpu().numpy()
         batch_tags = labels.detach().cpu().numpy()
@@ -144,7 +141,7 @@ def evaluate(model, data_iterator, params, mark='Eval', verbose=False):
     metrics['f1'] = f1
     metrics_str = "; ".join("{}: {:05.2f}".format(k, v)
                             for k, v in metrics.items())
-    tqdm.write("- {} metrics: ".format(mark) + metrics_str)
+    logging.info("- {} metrics: ".format(mark) + metrics_str)
 
     if verbose:
         report = classification_report(true_tags, pred_tags)
@@ -237,9 +234,12 @@ def train_active(model, data_loader, optimizer, params, model_dir):
                 break
 
     if len(val_f1_track) > 0:
-        ndarray_file = os.path.join(model_dir, params.active_strategy)
-        np.save(ndarray_file, np.array(val_f1_track))
-        logging.info('Save val f1 track in {}'.format(ndarray_file))
+        csv_file = os.path.join(model_dir, 'val_f1.csv')
+        utils.save_csv(
+            strategy.get_strategy_label(params.active_strategy, params.use_crf),
+            np.array(val_f1_track), csv_file
+        )
+        logging.info('Save val f1 track in {}'.format(csv_file))
 
 
 if __name__ == '__main__':

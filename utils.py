@@ -3,6 +3,7 @@ import logging
 import os
 import shutil
 
+import pandas as pd
 import torch
 
 
@@ -89,6 +90,16 @@ def set_logger(log_path):
         stream_handler = logging.StreamHandler()
         stream_handler.setFormatter(logging.Formatter('%(message)s'))
         logger.addHandler(stream_handler)
+
+
+def save_csv(header, data, csv_file):
+    """Add a column to 'csv_file'"""
+    if os.path.exists(csv_file) is False:
+        df = pd.DataFrame(data=data, columns=[header])
+    else:
+        df = pd.read_csv(csv_file, index_col=0)
+        df[header] = data
+    df.to_csv(csv_file)
 
 
 def save_json(params, json_file):
