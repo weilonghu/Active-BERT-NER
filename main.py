@@ -31,16 +31,17 @@ parser.add_argument('--loss_scale', type=float, default=0,
 parser.add_argument('--full_finetuning', action='store_false', help='BERT: If full finetuning bert model')
 parser.add_argument('--max_len', default=128, type=int, help='BERT: maximul sequence lenghth')
 parser.add_argument('--bert_model_dir', default='pretrained_bert_models/bert_base_cased', type=str, help='BERT: directory containing BERT model')
-parser.add_argument('--learning_rate', default=1e-5, type=float, help='Learning rate for the optimizer')
+parser.add_argument('--learning_rate', default=5e-5, type=float, help='Learning rate for the optimizer')
 parser.add_argument('--weight_decay', default=0.01, type=float, help='Weight decay for the optimizer')
 parser.add_argument('--clip_grad', default=1.0, type=float, help='Gradient clipping')
 parser.add_argument('--warmup_steps', default=250, type=int, help='Warmup configuration for the optimizer')
-parser.add_argument('--min_lr_ratio', default=0.5, type=float, help='Minimum learning rate')
+parser.add_argument('--min_lr_ratio', default=0.05, type=float, help='Minimum learning rate')
 parser.add_argument('--decay_steps', default=1500, type=int, help="Decay steps for LambdLR scheduler")
 parser.add_argument('--adam_epsilon', default=1e-8, type=float, help='Configuration for the optimizer')
 parser.add_argument('--patience', default=0.001, type=float, help='Increasement between two epochs')
 parser.add_argument('--patience_num', default=30, type=int, help='Early stopping creteria')
 parser.add_argument('--batch_size', default=32, type=int, help='Batch size for training and testing')
+parser.add_argument('--query_batch_size', default=32, type=int, help='Batch size for query unlabeled data')
 parser.add_argument('--max_query_num', default=60, type=int, help='Maximum number of queried batches with active learning')
 parser.add_argument('--min_query_num', default=20, type=int, help='Minimum number of queried batches with active learning')
 parser.add_argument('--num_epoch', default=1, type=int, help='Number of training epochs')
@@ -51,11 +52,12 @@ parser.add_argument('--do_test', action='store_false', help='If test the model')
 parser.add_argument('--eval_every', default=1, type=int, help='Evaluate the model every "eval_every" batchs')
 parser.add_argument('--log_every', default=50, type=int, help='Print log every "log_every" batchs')
 parser.add_argument('--incremental_train', action='store_true', help='When selecting a batch actively, if only train on the batch')
-parser.add_argument('--active_strategy', default='least_confidence', type=str, help='Strategy name used in active learning')
+parser.add_argument('--uncertainty_strategy', default='least_confidence', type=str, help='Strategy name used for uncertainty sampling')
+parser.add_argument('--desity_strategy', default='none', type=str, help='Strategy name used for density sampling')
 parser.add_argument('--use_crf', action='store_true', help='If stack crf layer on BERT model')
 
 
-def train(model, data_iterator, optimizer, params):
+def train(model, data_iterator, optimizer, scheduler, params):
     """Train the model on `steps` batches"""
     # set model to training mode
     model.train()
@@ -70,8 +72,9 @@ def train(model, data_iterator, optimizer, params):
             input_ids, label_ids, attention_mask, sentence_ids, label_mask = batch
 
             # compute model output and loss
-            logits, padded_labels = model(input_ids, token_type_ids=sentence_ids,
-                                          attention_mask=attention_mask, label_ids=label_ids, label_masks=label_mask)
+            outputs = model(input_ids, token_type_ids=sentence_ids, attention_mask=attention_mask,
+                            label_ids=label_ids, label_masks=label_mask)
+            logits, padded_labels = outputs[0], outputs[1]
             loss = model.loss(logits=logits, labels=padded_labels)
 
             if params.n_gpu > 1 and args.multi_gpu:
@@ -88,6 +91,8 @@ def train(model, data_iterator, optimizer, params):
 
             # performs updates using calculated gradients
             optimizer.step()
+            if scheduler is not None:
+                scheduler.step()
             # clear previous gradients, compute gradients of all variables wrt loss
             model.zero_grad()
 
@@ -116,8 +121,9 @@ def evaluate(model, data_iterator, params, mark='Eval', verbose=False):
         input_ids, label_ids, attention_mask, sentence_ids, label_mask = batch
 
         with torch.no_grad():
-            logits, labels = model(input_ids, token_type_ids=sentence_ids, attention_mask=attention_mask,
-                                   label_ids=label_ids, label_masks=label_mask)
+            outputs = model(input_ids, token_type_ids=sentence_ids, attention_mask=attention_mask,
+                            label_ids=label_ids, label_masks=label_mask)
+            logits, labels = outputs[0], outputs[1]
             batch_output = model.predict(logits, labels)[0]
 
         batch_output = batch_output.detach().cpu().numpy()
@@ -149,14 +155,16 @@ def evaluate(model, data_iterator, params, mark='Eval', verbose=False):
     return metrics
 
 
-def train_active(model, data_loader, optimizer, params, model_dir):
+def train_active(model, data_loader, optimizer, scheduler, params, model_dir):
     """Train the model and evaluate every epoch."""
 
     best_val_f1 = 0.0
     val_f1_track = []
     patience_counter = 0
     val_data_iterator = data_loader.data_iterator('val', shuffle=False)
-    strategy = ActiveStrategy(num_labels=len(params.tag2idx))
+    strategy = ActiveStrategy(num_labels=len(params.tag2idx),
+                              uncertainty_strategy=params.uncertainty_strategy,
+                              desity_strategy=params.desity_strategy)
 
     for query in range(1, params.max_query_num + 1):
 
@@ -166,30 +174,35 @@ def train_active(model, data_loader, optimizer, params, model_dir):
             unlabel_logits = []
             unlabel_masks = []
             unlabel_confidences = []
+            unlabel_hidden = []
             unlabeled_iter = data_loader.data_iterator('unlabeled', shuffle=False)
             with torch.no_grad():
                 for batch in unlabeled_iter:
                     batch = [elem.to(params.device) for elem in batch]
                     input_ids, label_ids, attention_mask, sentence_ids, label_mask = batch
-                    logits, padded_labels = model(input_ids, token_type_ids=sentence_ids,
-                                                  attention_mask=attention_mask,
-                                                  label_ids=label_ids, label_masks=label_mask)
+                    outputs = model(input_ids, token_type_ids=sentence_ids, attention_mask=attention_mask,
+                                    label_ids=label_ids, label_masks=label_mask, output_hidden=True)
+                    logits, padded_labels, hiddens = outputs[0], outputs[1], outputs[2]
                     confidence = model.predict(logits=logits, labels=padded_labels)[1]
 
                     unlabel_logits.append(logits.cpu().detach())
                     unlabel_masks.append((padded_labels != -1).cpu().detach())
                     unlabel_confidences.append(confidence.cpu().detach())
+                    unlabel_hidden.append(hiddens)
             del unlabeled_iter
+            similarities = strategy.pcosine_similarity(x1=torch.cat(unlabel_hidden, dim=0))
+            similarities = similarities.cpu().detach()
 
             # Query a batch of unlabeled data, then put into train set
-            query_num = min(num_unlabeled_data, params.batch_size)
+            query_num = min(num_unlabeled_data, params.query_batch_size)
             query_idx = strategy.sample_batch(
-                strategy_name=params.active_strategy,
+                total_num=num_unlabeled_data,
                 query_num=query_num,
                 num_unlabeled=num_unlabeled_data,
                 logitss=unlabel_logits,
                 masks=unlabel_masks,
-                confidences=unlabel_confidences
+                confidences=unlabel_confidences,
+                similarities=similarities
             )
             data_loader.update_train(query_idx)
         else:
@@ -205,7 +218,7 @@ def train_active(model, data_loader, optimizer, params, model_dir):
             train_iter = iter([sample_data])
         else:
             train_iter = data_loader.data_iterator('train', shuffle=True)
-        train(model, train_iter, optimizer, params)
+        train(model, train_iter, optimizer, scheduler, params)
         data_loader.update_unlabeled(query_idx)
         del train_iter
 
@@ -236,7 +249,7 @@ def train_active(model, data_loader, optimizer, params, model_dir):
     if len(val_f1_track) > 0:
         csv_file = os.path.join(model_dir, 'val_f1.csv')
         utils.save_csv(
-            strategy.get_strategy_label(params.active_strategy, params.use_crf),
+            strategy.get_strategy_label(params.use_crf),
             np.array(val_f1_track), csv_file
         )
         logging.info('Save val f1 track in {}'.format(csv_file))
@@ -322,6 +335,16 @@ if __name__ == '__main__':
         optimizer = AdamW(optimizer_grouped_parameters,
                           lr=params.learning_rate)
 
+        def lr_lambda(current_step):
+            if current_step < params.warmup_steps:
+                return float(current_step) / float(max(1, params.warmup_steps))
+            return max(
+                params.min_lr_ratio,
+                1.0 - (current_step - params.warmup_steps) * (1 - params.min_lr_ratio) / params.decay_steps
+            )
+
+        scheduler = LambdaLR(optimizer, lr_lambda=lr_lambda, last_epoch=-1)
+
     # restore the model
     if params.restore_dir is not None:
         model = BertForSequenceTagging.from_pretrained(params.restore_dir)
@@ -332,12 +355,17 @@ if __name__ == '__main__':
         if params.train_size > 0:
             logging.info("\n>> Starting training for {} epoch(s)".format(params.num_epoch))
             train_iter = data_loader.data_iterator('train', shuffle=True)
-            train(model, train_iter, optimizer, params)
+            train(model, train_iter, optimizer, scheduler, params)
             del train_iter
 
         if params.train_size < 1:
-            logging.info('\n>> Start training using strategy {}...'.format(params.active_strategy))
-            train_active(model, data_loader, optimizer, params, model_dir)
+            logging.info('\n>> Start training using strategy {} {}'.format(params.uncertainty_strategy, params.desity_strategy))
+            train_active(model, data_loader, optimizer, scheduler, params, model_dir)
+
+            logging.info("\n>> Starting training for {} epoch(s) after active learning".format(params.num_epoch))
+            train_iter = data_loader.data_iterator('train', shuffle=True)
+            train(model, train_iter, optimizer, scheduler, params)
+            del train_iter
 
     if params.do_test:
         logging.info('\n>> Starting testing the model...')

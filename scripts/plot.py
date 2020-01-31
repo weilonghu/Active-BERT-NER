@@ -11,8 +11,17 @@ parser.add_argument('--dataset', default='conll', help="Directory containing the
 
 def lineplot(model_dir):
 
+    dash_styles = ["",
+        (4, 1.5),
+        (1, 1),
+        (3, 1, 1.5, 1),
+        (5, 1, 1, 1),
+        (5, 1, 2, 1, 2, 1),
+        (2, 2, 3, 1.5),
+        (1, 2.5, 3, 1.2)]
+
     df = pd.read_csv(os.path.join(model_dir, 'val_f1.csv'), index_col=0)
-    ax = sns.lineplot(data=df, palette="tab10", linewidth=2)
+    ax = sns.lineplot(data=df, palette="tab10", linewidth=2, dashes=dash_styles)
     ax.set(ylim=(0.6, 1.0), xlim=(10, 60))
     ax.set(xlabel='Batch', ylabel='Val F1')
     ax.get_figure().savefig(os.path.join(model_dir, 'val_f1.png'))

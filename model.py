@@ -15,8 +15,8 @@ class BertForSequenceTagging(BertForTokenClassification):
 
         self.loss_fct = CrossEntropyLoss(ignore_index=-1, reduction='sum')
 
-    def forward(self, input_ids, token_type_ids=None, attention_mask=None,
-                position_ids=None, head_mask=None, label_ids=None, label_masks=None):
+    def forward(self, input_ids, token_type_ids=None, attention_mask=None, position_ids=None,
+                head_mask=None, label_ids=None, label_masks=None, output_hidden=False):
 
         outputs = self.bert(input_ids, position_ids=position_ids, token_type_ids=token_type_ids,
                             attention_mask=attention_mask, head_mask=head_mask)
@@ -36,7 +36,8 @@ class BertForSequenceTagging(BertForTokenClassification):
         labels = [label[mask] for mask, label in zip(label_masks, label_ids)]
         padded_labels = pad_sequence(labels, batch_first=True, padding_value=-1)
 
-        return logits, padded_labels
+        out = (logits, padded_labels) if output_hidden is False else (logits, padded_labels, outputs[1])
+        return out
 
     def loss(self, logits, labels):
 
@@ -48,11 +49,11 @@ class BertForSequenceTagging(BertForTokenClassification):
 
     def predict(self, logits, labels):
 
-        max_probs, output = torch.max(F.log_softmax(logits, dim=2), dim=2)
+        max_probs, output = torch.max(F.softmax(logits, dim=2), dim=2)
 
-        lens = torch.sum((labels != -1).float(), dim=1)
+        mask = (labels != -1).float()
         reverse_mask = (labels == -1).float()
-        confidence = torch.sum(torch.log(max_probs + reverse_mask), dim=1) + lens
+        confidence = torch.prod(max_probs * mask + reverse_mask, dim=1)
 
         return (output, confidence)
 
