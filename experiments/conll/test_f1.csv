@@ -1,9 +1,0 @@
-strategy,f1,class
-Least,0.90,Base
-Random,0.88,Base
-Entropy,0.89,Base
-Least,0.90,CRF
-Random,0.88,CRF
-Entropy,0.89,CRF
-None,0.90,Base
-None,0.90,CRF
