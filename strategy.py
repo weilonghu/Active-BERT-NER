@@ -5,22 +5,22 @@ from torch.distributions.categorical import Categorical
 
 class ActiveStrategy(object):
 
-    def __init__(self, num_labels, uncertainty_strategy, desity_strategy):
+    def __init__(self, num_labels, uncertainty_strategy, density_strategy):
 
         self.num_labels = num_labels
 
-        if uncertainty_strategy == 'none' and desity_strategy == 'none':
-            raise ValueError('Uncertainty and desity strategies can not be none at the same time')
+        if uncertainty_strategy == 'none' and density_strategy == 'none':
+            raise ValueError('Uncertainty and density strategies can not be none at the same time')
 
         if uncertainty_strategy != 'none':
             self.uncertainty_strategy = uncertainty_strategy.strip().split('+')
         else:
             self.uncertainty_strategy = []
 
-        if desity_strategy != 'none':
-            self.desity_strategy = desity_strategy.strip().split('+')
+        if density_strategy != 'none':
+            self.density_strategy = density_strategy.strip().split('+')
         else:
-            self.desity_strategy = []
+            self.density_strategy = []
 
         self.label_map = {
             'random_select': 'R',
@@ -32,16 +32,16 @@ class ActiveStrategy(object):
     def get_strategy_label(self, use_crf):
 
         uncertainty_labels = [self.label_map[name] for name in self.uncertainty_strategy]
-        desity_labels = [self.label_map[name] for name in self.desity_strategy]
+        density_labels = [self.label_map[name] for name in self.density_strategy]
         uncertainty_labels = '+'.join(uncertainty_labels)
-        desity_labels = '+'.join(desity_labels)
+        density_labels = '+'.join(density_labels)
 
-        if len(uncertainty_labels) > 0 and len(desity_labels) > 0:
-            label = '{}+{}'.format(uncertainty_labels, desity_labels)
-        elif len(uncertainty_labels) == 0 and len(desity_labels) == 0:
+        if len(uncertainty_labels) > 0 and len(density_labels) > 0:
+            label = '{}+{}'.format(uncertainty_labels, density_labels)
+        elif len(uncertainty_labels) == 0 and len(density_labels) == 0:
             label = 'R'
         else:
-            label = '{}{}'.format(uncertainty_labels, desity_labels)
+            label = '{}{}'.format(uncertainty_labels, density_labels)
 
         if use_crf is True:
             label = '{}+C'.format(label)
@@ -51,23 +51,23 @@ class ActiveStrategy(object):
     def sample_batch(self, total_num, query_num, **kwargs):
 
         uncertianty_scores = []
-        desity_scores = []
+        density_scores = []
 
         for strategy in self.uncertainty_strategy:
             strategy_func = getattr(self, '{}_sample'.format(strategy))
             scores = strategy_func(query_num, **kwargs)
             uncertianty_scores.append(scores)
-        for strategy in self.desity_strategy:
+        for strategy in self.density_strategy:
             strategy_func = getattr(self, '{}_sample'.format(strategy))
             scores = strategy_func(query_num, **kwargs)
-            desity_scores.append(scores)
+            density_scores.append(scores)
 
         # Just make production
         uncertianty_scores = torch.stack(uncertianty_scores) if len(uncertianty_scores) > 0 else torch.ones(total_num)
-        desity_scores = torch.stack(desity_scores) if len(desity_scores) > 0 else torch.ones(total_num)
+        density_scores = torch.stack(density_scores) if len(density_scores) > 0 else torch.ones(total_num)
 
         # Combine two scores
-        scores = torch.prod(torch.cat((uncertianty_scores.view(1, -1), desity_scores.view(1, -1)), dim=0), dim=0)
+        scores = torch.prod(torch.cat((uncertianty_scores.view(1, -1), density_scores.view(1, -1)), dim=0), dim=0)
 
         # Select topk as queried items
         _, indices = torch.topk(scores, query_num)
@@ -92,7 +92,7 @@ class ActiveStrategy(object):
     def random_select_sample(self, query_num, num_unlabeled, **kwargs):
 
         indices = np.random.choice(np.arange(num_unlabeled), query_num)
-        scores = np.ones(num_unlabeled)
+        scores = np.ones(num_unlabeled, dtype=np.float32)
         scores[indices] += 1
 
         return torch.from_numpy(scores)

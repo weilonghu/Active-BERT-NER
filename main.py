@@ -52,8 +52,8 @@ parser.add_argument('--do_test', action='store_false', help='If test the model')
 parser.add_argument('--eval_every', default=1, type=int, help='Evaluate the model every "eval_every" batchs')
 parser.add_argument('--log_every', default=50, type=int, help='Print log every "log_every" batchs')
 parser.add_argument('--incremental_train', action='store_true', help='When selecting a batch actively, if only train on the batch')
-parser.add_argument('--uncertainty_strategy', default='least_confidence', type=str, help='Strategy name used for uncertainty sampling')
-parser.add_argument('--desity_strategy', default='none', type=str, help='Strategy name used for density sampling')
+parser.add_argument('--uncertainty_strategy', default='random_select', type=str, help='Strategy name used for uncertainty sampling')
+parser.add_argument('--density_strategy', default='none', type=str, help='Strategy name used for density sampling')
 parser.add_argument('--use_crf', action='store_true', help='If stack crf layer on BERT model')
 
 
@@ -145,7 +145,7 @@ def evaluate(model, data_iterator, params, mark='Eval', verbose=False):
     metrics = {}
     f1 = f1_score(true_tags, pred_tags)
     metrics['f1'] = f1
-    metrics_str = "; ".join("{}: {:05.2f}".format(k, v)
+    metrics_str = "; ".join("{}: {:05.3f}".format(k, v)
                             for k, v in metrics.items())
     logging.info("- {} metrics: ".format(mark) + metrics_str)
 
@@ -164,7 +164,7 @@ def train_active(model, data_loader, optimizer, scheduler, params, model_dir):
     val_data_iterator = data_loader.data_iterator('val', shuffle=False)
     strategy = ActiveStrategy(num_labels=len(params.tag2idx),
                               uncertainty_strategy=params.uncertainty_strategy,
-                              desity_strategy=params.desity_strategy)
+                              density_strategy=params.density_strategy)
 
     for query in range(1, params.max_query_num + 1):
 
@@ -359,7 +359,7 @@ if __name__ == '__main__':
             del train_iter
 
         if params.train_size < 1:
-            logging.info('\n>> Start training using strategy {} {}'.format(params.uncertainty_strategy, params.desity_strategy))
+            logging.info('\n>> Start training using strategy: {}, {}'.format(params.uncertainty_strategy, params.density_strategy))
             train_active(model, data_loader, optimizer, scheduler, params, model_dir)
 
             logging.info("\n>> Starting training for {} epoch(s) after active learning".format(params.num_epoch))
