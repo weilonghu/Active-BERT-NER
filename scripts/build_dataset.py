@@ -32,6 +32,10 @@ def load_dataset(path_dataset):
                     assert len(words) == len(tags)
                     dataset.append((words, tags))
                     words, tags = [], []
+        if len(words) > 0:
+            assert len(words) == len(tags)
+            dataset.append((words, tags))
+            words, tags = [], []
     return dataset
 
 

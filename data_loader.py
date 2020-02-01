@@ -1,6 +1,5 @@
 import os
 import torch
-import random
 import logging
 import numpy as np
 from collections import defaultdict
@@ -9,10 +8,11 @@ from transformers import BertTokenizer
 
 
 class Dataset(data.Dataset):
-    def __init__(self, data_list, data_ids, tokenizer, label_map, max_len):
+    def __init__(self, human_data, machine_data, data_ids, tokenizer, label_map, max_len):
         self.max_len = max_len
         self.label_map = label_map
-        self.data_list = data_list
+        self.human_data = human_data
+        self.machine_data = machine_data
         self.data_ids = data_ids
         self.tokenizer = tokenizer
 
@@ -20,7 +20,12 @@ class Dataset(data.Dataset):
         return len(self.data_ids)
 
     def __getitem__(self, idx):
-        text, label = self.data_list[self.data_ids[idx]]
+
+        real_id = self.data_ids[idx]
+        if idx in self.machine_data:
+            text, label = self.human_data[real_id][0], self.machine_data[real_id]
+        else:
+            text, label = self.human_data[real_id]
 
         return self._get_feature(text, label)
 
@@ -86,8 +91,10 @@ class Dataset(data.Dataset):
         assert len(input_ids) == len(label_ids) == len(attention_mask) == len(sentence_id) == len(
             label_mask) == self.max_len, len(input_ids)
 
-        input_ids, label_ids, label_mask = torch.LongTensor(input_ids), torch.LongTensor(label_ids), torch.BoolTensor(label_mask)
-        attention_mask, sentence_id = torch.LongTensor(attention_mask), torch.LongTensor(sentence_id)
+        input_ids, label_ids, label_mask = torch.LongTensor(
+            input_ids), torch.LongTensor(label_ids), torch.BoolTensor(label_mask)
+        attention_mask, sentence_id = torch.LongTensor(
+            attention_mask), torch.LongTensor(sentence_id)
 
         return [input_ids, label_ids, attention_mask, sentence_id, label_mask]
 
@@ -103,7 +110,8 @@ class DataLoader:
         params.tag2idx = self.tag2idx
         params.idx2tag = self.idx2tag
 
-        self.tokenizer = BertTokenizer.from_pretrained(bert_model_dir, do_lower_case=False)
+        self.tokenizer = BertTokenizer.from_pretrained(
+            bert_model_dir, do_lower_case=False)
 
         self._load_sentence_and_tag()
 
@@ -120,29 +128,33 @@ class DataLoader:
 
         # Read all files
         for data_type in ['train', 'val', 'test']:
-            sentences = [line.strip() for line in open(os.path.join(self.data_dir, data_type, 'sentences.txt'), 'r')]
-            tags = [line.strip() for line in open(os.path.join(self.data_dir, data_type, 'tags.txt'), 'r')]
+            sentences = [line.strip() for line in open(
+                os.path.join(self.data_dir, data_type, 'sentences.txt'), 'r')]
+            tags = [line.strip() for line in open(
+                os.path.join(self.data_dir, data_type, 'tags.txt'), 'r')]
             assert len(sentences) == len(tags)
 
             for sentence, tag in zip(sentences, tags):
                 sentence, tag = sentence.split(), tag.split()
                 assert len(sentence) == len(tag)
                 data[data_type].append((sentence, tag))
-                
+
         # Generate initialized train set and unlabeled set
         train_size = int(self.params.train_size * len(data['train']))
 
-        self.data_list = data['train'] + data['val'] + data['test']
+        self.human_data = data['train'] + data['val'] + data['test']
+        self.machine_data = {}
         unlabeled_ids = np.arange(len(data['train']))
         val_ids = len(unlabeled_ids) + np.arange(len(data['val']))
-        test_ids = len(unlabeled_ids) + len(val_ids) + np.arange(len(data['test']))
+        test_ids = len(unlabeled_ids) + len(val_ids) + \
+            np.arange(len(data['test']))
         train_ids = np.random.choice(unlabeled_ids, train_size)
 
         self.datasets = {
-            'train': Dataset(data_list, train_ids, self.tokenizer, self.tag2idx, self.params.max_len),
-            'val': Dataset(data_list, val_ids, self.tokenizer, self.tag2idx, self.params.max_len),
-            'test': Dataset(data_list, test_ids, self.tokenizer, self.tag2idx, self.params.max_len),
-            'unlabeled': Dataset(data_list, unlabeled_ids, self.tokenizer, self.tag2idx, self.params.max_len)
+            'train': Dataset(self.human_data, self.machine_data, train_ids, self.tokenizer, self.tag2idx, self.params.max_len),
+            'val': Dataset(self.human_data, self.machine_data, val_ids, self.tokenizer, self.tag2idx, self.params.max_len),
+            'test': Dataset(self.human_data, self.machine_data, test_ids, self.tokenizer, self.tag2idx, self.params.max_len),
+            'unlabeled': Dataset(self.human_data, self.machine_data, unlabeled_ids, self.tokenizer, self.tag2idx, self.params.max_len)
         }
 
         logging.info('Dataset Info: train={}, val={}, test={}, unlabeled={}'.format(
@@ -161,11 +173,13 @@ class DataLoader:
         """Put data from unlabeled set to trani set"""
 
         sample_data_ids = self.datasets['unlabeled'].data_ids[indices]
-        self.datasets['train'].data_ids = np.concatenate((self.datasets['train'].data_ids, sample_data_ids), axis=0)
+        self.datasets['train'].data_ids = np.concatenate(
+            (self.datasets['train'].data_ids, sample_data_ids), axis=0)
 
     def update_unlabeled(self, indices):
 
-        self.datasets['unlabeled'].data_ids = np.delete(self.datasets['unlabeled'].data_ids, indices)
+        self.datasets['unlabeled'].data_ids = np.delete(
+            self.datasets['unlabeled'].data_ids, indices)
 
     def unlabled_length(self):
 
@@ -174,3 +188,8 @@ class DataLoader:
     def train_length(self):
 
         return len(self.datasets['train'].data_ids)
+
+    def machine_label(self, indices, labels):
+
+        for idx, label in zip(indices, labels):
+            self.machine_data[self.datasets['unlabeled'].data_ids[idx]] = label

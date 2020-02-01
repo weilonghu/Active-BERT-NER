@@ -11,7 +11,8 @@ parser.add_argument('--dataset', default='conll', help="Directory containing the
 
 def lineplot(model_dir):
 
-    dash_styles = ["",
+    dash_styles = [
+        "",
         (4, 1.5),
         (1, 1),
         (3, 1, 1.5, 1),
