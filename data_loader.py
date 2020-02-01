@@ -132,7 +132,7 @@ class DataLoader:
         # Generate initialized train set and unlabeled set
         train_size = int(self.params.train_size * len(data['train']))
 
-        data_list = data['train'] + data['val'] + data['test']
+        self.data_list = data['train'] + data['val'] + data['test']
         unlabeled_ids = np.arange(len(data['train']))
         val_ids = len(unlabeled_ids) + np.arange(len(data['val']))
         test_ids = len(unlabeled_ids) + len(val_ids) + np.arange(len(data['test']))

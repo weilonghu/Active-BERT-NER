@@ -44,6 +44,8 @@ parser.add_argument('--batch_size', default=32, type=int, help='Batch size for t
 parser.add_argument('--query_batch_size', default=32, type=int, help='Batch size for query unlabeled data')
 parser.add_argument('--max_query_num', default=60, type=int, help='Maximum number of queried batches with active learning')
 parser.add_argument('--min_query_num', default=20, type=int, help='Minimum number of queried batches with active learning')
+parser.add_argument('--size_threshold', default=100, type=int, help='Self-training threshold for train set size')
+parser.add_argument('--confidence_threshold', default='top_0.03', type=str, help='Threshold for self-training, abs_0.x|top_x')
 parser.add_argument('--num_epoch', default=1, type=int, help='Number of training epochs')
 parser.add_argument('--num_workers', default=0, type=int, help='Number of workers for pytorch DataLoader')
 parser.add_argument('--train_size', default=0, type=float, help='Proportion of train dataset for initialized training')
