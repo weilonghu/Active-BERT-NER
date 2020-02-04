@@ -8,6 +8,7 @@ class ActiveStrategy(object):
     def __init__(self, num_labels, uncertainty_strategy, density_strategy):
 
         self.num_labels = num_labels
+        self.beta = 1
 
         if uncertainty_strategy == 'none' and density_strategy == 'none':
             raise ValueError('Uncertainty and density strategies can not be none at the same time')
@@ -26,7 +27,8 @@ class ActiveStrategy(object):
             'random_select': 'R',
             'least_confidence': 'LC',
             'token_entropy': 'TE',
-            'representative': 'Rep'
+            'representative': 'Rep',
+            'total_token_entropy': 'TTE'
         }
 
     def get_strategy_label(self, use_crf):
@@ -56,11 +58,11 @@ class ActiveStrategy(object):
         for strategy in self.uncertainty_strategy:
             strategy_func = getattr(self, '{}_sample'.format(strategy))
             scores = strategy_func(query_num, **kwargs)
-            uncertianty_scores.append(scores)
+            uncertianty_scores.append(scores.cpu())
         for strategy in self.density_strategy:
             strategy_func = getattr(self, '{}_sample'.format(strategy))
             scores = strategy_func(query_num, **kwargs)
-            density_scores.append(scores)
+            density_scores.append(scores.cpu())
 
         # Just make production
         uncertianty_scores = torch.stack(uncertianty_scores) if len(uncertianty_scores) > 0 else torch.ones(total_num)
@@ -74,7 +76,7 @@ class ActiveStrategy(object):
 
         return indices
 
-    def token_entropy_sample(self, query_num, logitss, masks, **kwargs):
+    def _token_entropy(self, query_num, logitss, masks, norm, **kwargs):
 
         token_entropy = []
         for logits, mask in zip(logitss, masks):
@@ -82,12 +84,22 @@ class ActiveStrategy(object):
             categorical = Categorical(logits=logits.view(-1, self.num_labels))
             entropy = categorical.entropy() * mask.view(-1)
             entropy = torch.sum(entropy.view(origin_num, -1), dim=-1)
-            lens = torch.sum(mask, dim=-1)
-            entropy = entropy / lens
+            if norm is True:
+                lens = torch.sum(mask, dim=-1)
+                entropy = entropy / lens
             token_entropy.append(entropy)
         token_entropy = torch.cat(token_entropy, dim=0)
 
+
         return token_entropy
+
+    def token_entropy_sample(self, query_num, **kwargs):
+
+        return self._token_entropy(query_num=query_num, norm=True, **kwargs)
+
+    def total_token_entropy_sample(self, query_num, **kwargs):
+
+        return self._token_entropy(query_num=query_num, norm=False, **kwargs)
 
     def random_select_sample(self, query_num, num_unlabeled, **kwargs):
 
@@ -112,8 +124,12 @@ class ActiveStrategy(object):
         w2 = w1 if x2 is x1 else x2.norm(p=2, dim=1, keepdim=True)
         return 1 - torch.mm(x1, x2.t()) / (w1 * w2.t()).clamp(min=eps)
 
-    def representative_sample(self, query_num, similarities, **kwargs):
+    def representative_sample(self, query_num, label_sims, unlabel_sims, **kwargs):
 
-        avg_sims = torch.mean(similarities, dim=1)
+        unlabel_sims = torch.mean(unlabel_sims, dim=1)
+        scores = torch.pow(unlabel_sims, self.beta)
+        if label_sims is not None:
+            label_sims = torch.mean(label_sims, dim=1)
+            scores = scores * torch.exp(-1 * label_sims)
 
-        return avg_sims
+        return scores

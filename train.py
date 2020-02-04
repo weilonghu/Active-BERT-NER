@@ -10,11 +10,11 @@ import torch
 import torch.nn as nn
 from torch.optim.lr_scheduler import LambdaLR
 from transformers.optimization import AdamW
-from seqeval.metrics import f1_score, classification_report
 
+import utils
 from data_loader import DataLoader
 from strategy import ActiveStrategy
-import utils
+from evaluate import evaluate
 
 
 parser = argparse.ArgumentParser()
@@ -22,8 +22,6 @@ parser.add_argument('--dataset', default='conll',
                     help="Directory containing the dataset")
 parser.add_argument('--seed', type=int, default=2019,
                     help="random seed for initialization")
-parser.add_argument('--restore_dir', default=None,
-                    help="Optional, name of the directory containing weights to reload before training, e.g., 'experiments/conll/'")
 parser.add_argument('--multi_gpu', default=False, action='store_true',
                     help="Whether to use multiple GPUs if available")
 parser.add_argument('--fp16', default=False, action='store_true',
@@ -32,6 +30,8 @@ parser.add_argument('--loss_scale', type=float, default=0,
                     help="Loss scaling to improve fp16 numeric stability. Only used when fp16 set to True.\n"
                     "0 (default value): dynamic loss scaling.\n"
                     "Positive power of 2: static loss scaling value.\n")
+parser.add_argument('--restore_dir', default=None,
+                    help="Optional, name of the directory containing weights to reload before training")
 parser.add_argument('--full_finetuning', action='store_false',
                     help='BERT: If full finetuning bert model')
 parser.add_argument('--max_len', default=128, type=int,
@@ -62,7 +62,7 @@ parser.add_argument('--query_batch_size', default=32, type=int,
                     help='Batch size for query unlabeled data')
 parser.add_argument('--max_query_num', default=60, type=int,
                     help='Maximum number of queried batches with active learning')
-parser.add_argument('--min_query_num', default=20, type=int,
+parser.add_argument('--min_query_num', default=40, type=int,
                     help='Minimum number of queried batches with active learning')
 parser.add_argument('--size_threshold', default=100, type=int,
                     help='Self-training threshold for train set size')
@@ -74,17 +74,13 @@ parser.add_argument('--num_workers', default=0, type=int,
                     help='Number of workers for pytorch DataLoader')
 parser.add_argument('--train_size', default=0, type=float,
                     help='Proportion of train dataset for initialized training')
-parser.add_argument('--do_train', action='store_false',
-                    help='If train the model')
-parser.add_argument('--do_test', action='store_false',
-                    help='If test the model')
 parser.add_argument('--eval_every', default=1, type=int,
                     help='Evaluate the model every "eval_every" batchs')
 parser.add_argument('--log_every', default=50, type=int,
                     help='Print log every "log_every" batchs')
 parser.add_argument('--incremental_train', action='store_true',
                     help='When selecting a batch actively, if only train on the batch')
-parser.add_argument('--uncertainty_strategy', default='random_select',
+parser.add_argument('--uncertainty_strategy', default='least_confidence',
                     type=str, help='Strategy name used for uncertainty sampling')
 parser.add_argument('--density_strategy', default='none',
                     type=str, help='Strategy name used for density sampling')
@@ -141,57 +137,6 @@ def train(model, data_iterator, optimizer, scheduler, params):
     return loss_avg()
 
 
-def evaluate(model, data_iterator, params, mark='Eval', verbose=False):
-    """Evaluate the model on `steps` batches."""
-    # set model to evaluation mode
-    model.eval()
-
-    idx2tag = params.idx2tag
-
-    true_tags = []
-    pred_tags = []
-
-    for batch in data_iterator:
-        # fetch the next evaluation batch
-        batch = [elem.to(params.device) for elem in batch]
-        input_ids, label_ids, attention_mask, sentence_ids, label_mask = batch
-
-        with torch.no_grad():
-            outputs = model(input_ids, token_type_ids=sentence_ids, attention_mask=attention_mask,
-                            label_ids=label_ids, label_masks=label_mask)
-            logits, labels = outputs[0], outputs[1]
-            batch_output = model.predict(logits, labels)[0]
-
-        batch_output = batch_output.detach().cpu().numpy()
-        batch_tags = labels.detach().cpu().numpy()
-
-        batch_true_tags = [
-            [idx2tag.get(idx) for idx in indices[np.where(indices != -1)]]
-            for indices in batch_tags]
-        batch_pred_tags = [
-            [idx2tag.get(idx)
-             for idx in indices[np.where(batch_tags[i] != -1)]]
-            for i, indices in enumerate(batch_output)]
-
-        true_tags.extend(batch_true_tags)
-        pred_tags.extend(batch_pred_tags)
-
-    assert len(pred_tags) == len(true_tags)
-
-    # logging loss, f1 and report
-    metrics = {}
-    f1 = f1_score(true_tags, pred_tags)
-    metrics['f1'] = f1
-    metrics_str = "; ".join("{}: {:05.3f}".format(k, v)
-                            for k, v in metrics.items())
-    logging.info("- {} metrics: ".format(mark) + metrics_str)
-
-    if verbose:
-        report = classification_report(true_tags, pred_tags)
-        logging.info(report)
-    return metrics
-
-
 def train_active(model, data_loader, optimizer, scheduler, params, model_dir):
     """Train the model and evaluate every epoch."""
 
@@ -207,42 +152,47 @@ def train_active(model, data_loader, optimizer, scheduler, params, model_dir):
 
         num_unlabeled_data = data_loader.unlabled_length()
         if num_unlabeled_data > 0:
-            # Collect infomation of unlabeled data, but each batch has diferent size
-            unlabel_logits = []
-            unlabel_masks = []
-            unlabel_confidences = []
-            unlabel_hidden = []
-            unlabeled_iter = data_loader.data_iterator(
-                'unlabeled', shuffle=False)
-            with torch.no_grad():
-                for batch in unlabeled_iter:
-                    batch = [elem.to(params.device) for elem in batch]
-                    input_ids, label_ids, attention_mask, sentence_ids, label_mask = batch
+            # set model to evaluation mode
+            model.eval()
+
+            # Collect infomation of unlabeled data, but each batch has different size
+            unlabeled_data = []
+            unlabeled_iter = data_loader.data_iterator('unlabeled', shuffle=False)
+            for batch in unlabeled_iter:
+                batch = [elem.to(params.device) for elem in batch]
+                input_ids, label_ids, attention_mask, sentence_ids, label_mask = batch
+                with torch.no_grad():
                     outputs = model(input_ids, token_type_ids=sentence_ids, attention_mask=attention_mask,
                                     label_ids=label_ids, label_masks=label_mask, output_hidden=True)
                     logits, padded_labels, hiddens = outputs[0], outputs[1], outputs[2]
                     confidence = model.predict(
                         logits=logits, labels=padded_labels)[1]
 
-                    unlabel_logits.append(logits.cpu().detach())
-                    unlabel_masks.append((padded_labels != -1).cpu().detach())
-                    unlabel_confidences.append(confidence.cpu().detach())
-                    unlabel_hidden.append(hiddens)
+                unlabeled_data.append((logits.detach(), (padded_labels != -1).detach(), confidence.detach(), hiddens.detach()))
             del unlabeled_iter
-            similarities = strategy.pcosine_similarity(
-                x1=torch.cat(unlabel_hidden, dim=0))
-            similarities = similarities.cpu().detach()
+
+            labeled_data = []
+            labeled_iter = data_loader.data_iterator('train', shuffle=False)
+            for batch in labeled_iter:
+                batch = [elem.to(params.device) for elem in batch]
+                input_ids, label_ids, attention_mask, sentence_ids, label_mask = batch
+                with torch.no_grad():
+                    outputs = model(input_ids, token_type_ids=sentence_ids, attention_mask=attention_mask,
+                                    label_ids=label_ids, label_masks=label_mask, output_hidden=True)
+                labeled_data.append(outputs[2].detach())
+            del labeled_iter
+
+            unlabel_sims = strategy.pcosine_similarity(x1=torch.cat([x[3] for x in unlabeled_data], dim=0))
+            label_sims = None if len(labeled_data) == 0 else strategy.pcosine_similarity(
+                x1=torch.cat([x[3] for x in unlabeled_data], dim=0), x2=torch.cat(labeled_data, dim=0))
 
             # Query a batch of unlabeled data, then put into train set
             query_num = min(num_unlabeled_data, params.query_batch_size)
             query_idx = strategy.sample_batch(
-                total_num=num_unlabeled_data,
-                query_num=query_num,
-                num_unlabeled=num_unlabeled_data,
-                logitss=unlabel_logits,
-                masks=unlabel_masks,
-                confidences=unlabel_confidences,
-                similarities=similarities
+                total_num=num_unlabeled_data, query_num=query_num,
+                logitss=[x[0] for x in unlabeled_data], masks=[x[1] for x in unlabeled_data],
+                confidences=[x[2] for x in unlabeled_data],
+                unlabel_sims=unlabel_sims, label_sims=label_sims
             )
             data_loader.update_train(query_idx)
         else:
@@ -301,6 +251,7 @@ def train_active(model, data_loader, optimizer, scheduler, params, model_dir):
 
 def main():
     args = parser.parse_args()
+
     model_dir = 'experiments/' + args.dataset
     # save the parameters to json file
     json_path = os.path.join(model_dir, 'params.json')
@@ -336,8 +287,12 @@ def main():
         from model import BertCRFForSequenceTagging as BertForSequenceTagging
     else:
         from model import BertForSequenceTagging
-    model = BertForSequenceTagging.from_pretrained(
-        params.bert_model_dir, num_labels=len(params.tag2idx))
+    if params.restore_dir is not None:
+        model = BertForSequenceTagging.from_pretrained(params.restore_dir)
+        logging.info('Restore model from {}'.format(params.restore_dir))
+    else:
+        model = BertForSequenceTagging.from_pretrained(
+            params.bert_model_dir, num_labels=len(params.tag2idx))
     model.to(params.device)
     if args.fp16:
         model.half()
@@ -393,36 +348,25 @@ def main():
 
         scheduler = LambdaLR(optimizer, lr_lambda=lr_lambda, last_epoch=-1)
 
-    # restore the model
-    if params.restore_dir is not None:
-        model = BertForSequenceTagging.from_pretrained(params.restore_dir)
-        logging.info('Restore model from {}'.format(params.restore_dir))
+    # Train the model with train set and evaluate the model with valid set
+    if params.train_size > 0:
+        logging.info(
+            "\n>> Starting training for {} epoch(s)".format(params.num_epoch))
+        train_iter = data_loader.data_iterator('train', shuffle=True)
+        train(model, train_iter, optimizer, scheduler, params)
+        del train_iter
 
-    # Train and evaluate the model
-    if params.do_train:
-        if params.train_size > 0:
-            logging.info(
-                "\n>> Starting training for {} epoch(s)".format(params.num_epoch))
-            train_iter = data_loader.data_iterator('train', shuffle=True)
-            train(model, train_iter, optimizer, scheduler, params)
-            del train_iter
+    if params.train_size < 1:
+        logging.info('\n>> Start training using strategy: {}, {}'.format(
+            params.uncertainty_strategy, params.density_strategy))
+        train_active(model, data_loader, optimizer,
+                        scheduler, params, model_dir)
 
-        if params.train_size < 1:
-            logging.info('\n>> Start training using strategy: {}, {}'.format(
-                params.uncertainty_strategy, params.density_strategy))
-            train_active(model, data_loader, optimizer,
-                         scheduler, params, model_dir)
-
-            logging.info("\n>> Starting training for {} epoch(s) after active learning".format(
-                params.num_epoch))
-            train_iter = data_loader.data_iterator('train', shuffle=True)
-            train(model, train_iter, optimizer, scheduler, params)
-            del train_iter
-
-    if params.do_test:
-        logging.info('\n>> Starting testing the model...')
-        test_iter = data_loader.data_iterator('test', shuffle=False)
-        evaluate(model, test_iter, params, mark='Test', verbose=True)
+        logging.info("\n>> Starting training for {} epoch(s) after active learning".format(
+            params.num_epoch))
+        train_iter = data_loader.data_iterator('train', shuffle=True)
+        train(model, train_iter, optimizer, scheduler, params)
+        del train_iter
 
 
 if __name__ == '__main__':

@@ -166,7 +166,8 @@ class DataLoader:
             dataset=self.datasets[data_type],
             batch_size=self.params.batch_size,
             shuffle=shuffle,
-            num_workers=self.params.num_workers
+            num_workers=self.params.num_workers,
+            drop_last=False
         )
 
     def update_train(self, indices):
