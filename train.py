@@ -1,4 +1,4 @@
-"""Train and evaluate the model"""
+"""Train the model"""
 
 import argparse
 import random
@@ -140,17 +140,16 @@ def train(model, data_iterator, optimizer, scheduler, params):
 def train_active(model, data_loader, optimizer, scheduler, params, model_dir):
     """Train the model and evaluate every epoch."""
 
-    best_val_f1 = 0.0
+    best_val_f1, patience_counter = 0.0, 0
     val_f1_track = []
-    patience_counter = 0
     val_data_iterator = data_loader.data_iterator('val', shuffle=False)
     strategy = ActiveStrategy(num_labels=len(params.tag2idx),
                               uncertainty_strategy=params.uncertainty_strategy,
                               density_strategy=params.density_strategy)
 
     for query in range(1, params.max_query_num + 1):
-
         num_unlabeled_data = data_loader.unlabled_length()
+
         if num_unlabeled_data > 0:
             # set model to evaluation mode
             model.eval()
@@ -172,15 +171,15 @@ def train_active(model, data_loader, optimizer, scheduler, params, model_dir):
             del unlabeled_iter
 
             labeled_data = []
-            labeled_iter = data_loader.data_iterator('train', shuffle=False)
-            for batch in labeled_iter:
-                batch = [elem.to(params.device) for elem in batch]
-                input_ids, label_ids, attention_mask, sentence_ids, label_mask = batch
-                with torch.no_grad():
-                    outputs = model(input_ids, token_type_ids=sentence_ids, attention_mask=attention_mask,
-                                    label_ids=label_ids, label_masks=label_mask, output_hidden=True)
-                labeled_data.append(outputs[2].detach())
-            del labeled_iter
+            # labeled_iter = data_loader.data_iterator('train', shuffle=False)
+            # for batch in labeled_iter:
+            #     batch = [elem.to(params.device) for elem in batch]
+            #     input_ids, label_ids, attention_mask, sentence_ids, label_mask = batch
+            #     with torch.no_grad():
+            #         outputs = model(input_ids, token_type_ids=sentence_ids, attention_mask=attention_mask,
+            #                         label_ids=label_ids, label_masks=label_mask, output_hidden=True)
+            #     labeled_data.append(outputs[2].detach())
+            # del labeled_iter
 
             unlabel_sims = strategy.pcosine_similarity(x1=torch.cat([x[3] for x in unlabeled_data], dim=0))
             label_sims = None if len(labeled_data) == 0 else strategy.pcosine_similarity(
@@ -194,7 +193,7 @@ def train_active(model, data_loader, optimizer, scheduler, params, model_dir):
                 confidences=[x[2] for x in unlabeled_data],
                 unlabel_sims=unlabel_sims, label_sims=label_sims
             )
-            data_loader.update_train(query_idx)
+            data_loader.active_update(query_idx)
         else:
             logging('No unlabeled data')
 
@@ -210,27 +209,21 @@ def train_active(model, data_loader, optimizer, scheduler, params, model_dir):
         else:
             train_iter = data_loader.data_iterator('train', shuffle=True)
         train(model, train_iter, optimizer, scheduler, params)
-        data_loader.update_unlabeled(query_idx)
         del train_iter
 
         # Evaluate for val dataset, perform early stopping
         if query % params.eval_every == 0:
             logging.info(
                 '\n-Evaluate at query {}, {} train examples'.format(query, data_loader.train_length()))
-            val_metrics = evaluate(
-                model, val_data_iterator, params, mark='Val')
+            val_metrics = evaluate(model, val_data_iterator, params, mark='Val')
 
-            val_f1 = val_metrics['f1']
-            val_f1_track.append(val_f1)
-            improve_f1 = val_f1 - best_val_f1
+            improve_f1 = val_metrics['f1'] - best_val_f1
+            val_f1_track.append(val_metrics['f1'])
             if improve_f1 > 0:
                 logging.info("- Found new best F1")
-                best_val_f1 = val_f1
+                best_val_f1 = val_metrics['f1']
                 model.save_pretrained(model_dir)
-                if improve_f1 < params.patience:
-                    patience_counter += 1
-                else:
-                    patience_counter = 0
+                patience_counter = patience_counter + 1 if improve_f1 < params.patience else 0
             else:
                 patience_counter += 1
 
@@ -246,7 +239,7 @@ def train_active(model, data_loader, optimizer, scheduler, params, model_dir):
             strategy.get_strategy_label(params.use_crf),
             np.array(val_f1_track), csv_file
         )
-        logging.info('Save val f1 track in {}'.format(csv_file))
+        logging.info('\n>>> Save val f1 track in {}'.format(csv_file))
 
 
 def main():
@@ -351,22 +344,22 @@ def main():
     # Train the model with train set and evaluate the model with valid set
     if params.train_size > 0:
         logging.info(
-            "\n>> Starting training for {} epoch(s)".format(params.num_epoch))
+            "\n>>> Starting training for {} epoch(s)".format(params.num_epoch))
         train_iter = data_loader.data_iterator('train', shuffle=True)
         train(model, train_iter, optimizer, scheduler, params)
         del train_iter
 
     if params.train_size < 1:
-        logging.info('\n>> Start training using strategy: {}, {}'.format(
+        logging.info('\n>>> Start training using strategy: {}, {}'.format(
             params.uncertainty_strategy, params.density_strategy))
         train_active(model, data_loader, optimizer,
                         scheduler, params, model_dir)
 
-        logging.info("\n>> Starting training for {} epoch(s) after active learning".format(
-            params.num_epoch))
-        train_iter = data_loader.data_iterator('train', shuffle=True)
-        train(model, train_iter, optimizer, scheduler, params)
-        del train_iter
+        # logging.info("\n>>> Starting training for {} epoch(s) after active learning".format(
+        #     params.num_epoch))
+        # train_iter = data_loader.data_iterator('train', shuffle=True)
+        # train(model, train_iter, optimizer, scheduler, params)
+        # del train_iter
 
 
 if __name__ == '__main__':

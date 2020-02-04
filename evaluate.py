@@ -1,3 +1,5 @@
+"""Evaluate the model"""
+
 import argparse
 import random
 import logging
@@ -114,7 +116,7 @@ def main():
     else:
         from model import BertForSequenceTagging
     model = BertForSequenceTagging.from_pretrained(
-        params.bert_model_dir, num_labels=len(params.tag2idx))
+        model_dir, num_labels=len(params.tag2idx))
     model.to(params.device)
 
     if args.fp16:
@@ -122,7 +124,7 @@ def main():
     if params.n_gpu > 1 and args.multi_gpu:
         model = torch.nn.DataParallel(model)
 
-    logging.info("\n>> Starting evaluation...")
+    logging.info("\n>>> Starting evaluation...")
     test_iter = data_loader.data_iterator('test', shuffle=False)
     evaluate(model, test_iter, params, mark='Test', verbose=True)
 

@@ -170,14 +170,12 @@ class DataLoader:
             drop_last=False
         )
 
-    def update_train(self, indices):
+    def active_update(self, indices):
         """Put data from unlabeled set to trani set"""
 
         sample_data_ids = self.datasets['unlabeled'].data_ids[indices]
         self.datasets['train'].data_ids = np.concatenate(
             (self.datasets['train'].data_ids, sample_data_ids), axis=0)
-
-    def update_unlabeled(self, indices):
 
         self.datasets['unlabeled'].data_ids = np.delete(
             self.datasets['unlabeled'].data_ids, indices)
