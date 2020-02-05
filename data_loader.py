@@ -197,10 +197,10 @@ class DataLoader:
         self.datasets['unlabeled'].data_ids = np.delete(
             self.datasets['unlabeled'].data_ids, indices)
 
-    def unlabled_length(self):
+    def get_dataset_info(self):
 
-        return len(self.datasets['unlabeled'].data_ids)
+        unlabeled_len = len(self.datasets['unlabeled'].data_ids)
+        labeled_len = len(self.datasets['train'].data_ids)
+        machine_len = len(self.machine_data)
 
-    def train_length(self):
-
-        return len(self.datasets['train'].data_ids)
+        return (unlabeled_len, labeled_len, machine_len)

@@ -71,7 +71,7 @@ class ActiveStrategy(object):
         Return:
             indices: (tuple) indices of machine labeled examples and human labeled examples
         """
-        if labeled_num >= self.size_threshold:
+        if self.size_threshold > 0 and labeled_num >= self.size_threshold:
             machine_indices = self.bootstrapping(query_num, **kwargs)
             machine_indices = machine_indices.cpu()
         else:

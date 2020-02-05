@@ -148,10 +148,9 @@ def train_active(model, data_loader, optimizer, scheduler, params, model_dir):
         params.confidence_threshold, params.size_threshold)
 
     for query in range(1, params.max_query_num + 1):
-        num_unlabeled_data = data_loader.unlabled_length()
-        num_labeled_data = data_loader.train_length()
+        num_unlabeled, num_labeled, _ = data_loader.get_dataset_info()
 
-        if num_unlabeled_data > 0:
+        if num_unlabeled > 0:
             # set model to evaluation mode
             model.eval()
 
@@ -189,9 +188,9 @@ def train_active(model, data_loader, optimizer, scheduler, params, model_dir):
                 x1=torch.cat([x[3] for x in unlabeled_data], dim=0), x2=torch.cat(labeled_data, dim=0))
 
             # Query a batch of unlabeled data, then put into train set
-            query_num = min(num_unlabeled_data, params.query_batch_size)
+            query_num = min(num_unlabeled, params.query_batch_size)
             machine_indices, human_indices = strategy.sample_batch(
-                labeled_num=num_labeled_data, unlabeled_num=num_unlabeled_data, query_num=query_num,
+                labeled_num=num_labeled, unlabeled_num=num_unlabeled, query_num=query_num,
                 logitss=[x[0] for x in unlabeled_data], masks=[(x[1] != -1) for x in unlabeled_data],
                 confidences=[x[2] for x in unlabeled_data],
                 unlabel_sims=unlabel_sims, label_sims=label_sims
@@ -203,7 +202,7 @@ def train_active(model, data_loader, optimizer, scheduler, params, model_dir):
             logging('No unlabeled data')
 
         # Train on new training data
-        if params.incremental_train and num_unlabeled_data > 0:
+        if params.incremental_train and num_unlabeled > 0:
             query_data = []
             for idx in torch.cat([machine_indices, human_indices], dim=0):
                 query_data.append(data_loader.datasets['unlabeled'][idx])
@@ -218,8 +217,9 @@ def train_active(model, data_loader, optimizer, scheduler, params, model_dir):
 
         # Evaluate for val dataset, perform early stopping
         if query % params.eval_every == 0:
-            logging.info(
-                '\n-Evaluate at query {}, {} train examples'.format(query, data_loader.train_length()))
+            num_unlabeled, num_labeled, num_machine = data_loader.get_dataset_info() 
+            logging.info('\n-Evaluate at query {}, num_unlabel={}, num_label={}, num_machine={}'.format(
+                query, num_unlabeled, num_labeled, num_machine))
             val_metrics = evaluate(model, val_data_iterator, params, mark='Val')
 
             improve_f1 = val_metrics['f1'] - best_val_f1
