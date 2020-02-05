@@ -8,7 +8,7 @@ from transformers import BertTokenizer
 
 
 class Dataset(data.Dataset):
-    def __init__(self, human_data, machine_data, data_ids, tokenizer, label_map, max_len):
+    def __init__(self, data_ids, human_data, machine_data, tokenizer, label_map, max_len):
         self.max_len = max_len
         self.label_map = label_map
         self.human_data = human_data
@@ -22,7 +22,7 @@ class Dataset(data.Dataset):
     def __getitem__(self, idx):
 
         real_id = self.data_ids[idx]
-        if idx in self.machine_data:
+        if real_id in self.machine_data:
             text, label = self.human_data[real_id][0], self.machine_data[real_id]
         else:
             text, label = self.human_data[real_id]
@@ -150,14 +150,19 @@ class DataLoader:
             np.arange(len(data['test']))
         train_ids = np.random.choice(unlabeled_ids, train_size)
 
-        self.datasets = {
-            'train': Dataset(self.human_data, self.machine_data, train_ids, self.tokenizer, self.tag2idx, self.params.max_len),
-            'val': Dataset(self.human_data, self.machine_data, val_ids, self.tokenizer, self.tag2idx, self.params.max_len),
-            'test': Dataset(self.human_data, self.machine_data, test_ids, self.tokenizer, self.tag2idx, self.params.max_len),
-            'unlabeled': Dataset(self.human_data, self.machine_data, unlabeled_ids, self.tokenizer, self.tag2idx, self.params.max_len)
+        shared_args = {
+            'human_data': self.human_data, 'machine_data': self.machine_data,
+            'tokenizer': self.tokenizer, 'label_map': self.tag2idx, 'max_len': self.params.max_len
         }
 
-        logging.info('Dataset Info: train={}, val={}, test={}, unlabeled={}'.format(
+        self.datasets = {
+            'train': Dataset(train_ids, **shared_args),
+            'val': Dataset(val_ids, **shared_args),
+            'test': Dataset(test_ids, **shared_args),
+            'unlabeled': Dataset(unlabeled_ids, **shared_args)
+        }
+
+        logging.info('>>> Dataset Info: train={}, val={}, test={}, unlabeled={}'.format(
             len(train_ids), len(val_ids), len(test_ids), len(unlabeled_ids)
         ))
 
@@ -170,9 +175,21 @@ class DataLoader:
             drop_last=False
         )
 
-    def active_update(self, indices):
-        """Put data from unlabeled set to trani set"""
+    def active_update(self, machine_indices, human_indices, padded_labels):
+        """Perform machine labeling and human labeling"""
 
+        # Machine labeling
+        if machine_indices is not None:
+            for idx in machine_indices:
+                batch_idx = idx // self.params.batch_size
+                label = padded_labels[batch_idx][idx % self.params.batch_size]
+                tags = [self.idx2tag[x] for x in label[label != -1]]
+                self.machine_data[self.datasets['unlabeled'].data_ids[idx]] = tags
+            indices = np.unique(np.concatenate((machine_indices, human_indices), axis=0))
+        else:
+            indices = human_indices
+
+        # Update unlabeled data and labeled data. Simulate the human annotation process
         sample_data_ids = self.datasets['unlabeled'].data_ids[indices]
         self.datasets['train'].data_ids = np.concatenate(
             (self.datasets['train'].data_ids, sample_data_ids), axis=0)
@@ -187,8 +204,3 @@ class DataLoader:
     def train_length(self):
 
         return len(self.datasets['train'].data_ids)
-
-    def machine_label(self, indices, labels):
-
-        for idx, label in zip(indices, labels):
-            self.machine_data[self.datasets['unlabeled'].data_ids[idx]] = label

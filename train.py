@@ -54,7 +54,7 @@ parser.add_argument('--adam_epsilon', default=1e-8,
                     type=float, help='Configuration for the optimizer')
 parser.add_argument('--patience', default=0.001, type=float,
                     help='Increasement between two epochs')
-parser.add_argument('--patience_num', default=30, type=int,
+parser.add_argument('--patience_num', default=50, type=int,
                     help='Early stopping creteria')
 parser.add_argument('--batch_size', default=32, type=int,
                     help='Batch size for training and testing')
@@ -66,7 +66,7 @@ parser.add_argument('--min_query_num', default=40, type=int,
                     help='Minimum number of queried batches with active learning')
 parser.add_argument('--size_threshold', default=100, type=int,
                     help='Self-training threshold for train set size')
-parser.add_argument('--confidence_threshold', default='top_0.03',
+parser.add_argument('--confidence_threshold', default='top_10',
                     type=str, help='Threshold for self-training, abs_0.x|top_x')
 parser.add_argument('--num_epoch', default=1, type=int,
                     help='Number of training epochs')
@@ -80,7 +80,7 @@ parser.add_argument('--log_every', default=50, type=int,
                     help='Print log every "log_every" batchs')
 parser.add_argument('--incremental_train', action='store_true',
                     help='When selecting a batch actively, if only train on the batch')
-parser.add_argument('--uncertainty_strategy', default='least_confidence',
+parser.add_argument('--uncertainty_strategy', default='lc',
                     type=str, help='Strategy name used for uncertainty sampling')
 parser.add_argument('--density_strategy', default='none',
                     type=str, help='Strategy name used for density sampling')
@@ -143,12 +143,13 @@ def train_active(model, data_loader, optimizer, scheduler, params, model_dir):
     best_val_f1, patience_counter = 0.0, 0
     val_f1_track = []
     val_data_iterator = data_loader.data_iterator('val', shuffle=False)
-    strategy = ActiveStrategy(num_labels=len(params.tag2idx),
-                              uncertainty_strategy=params.uncertainty_strategy,
-                              density_strategy=params.density_strategy)
+    strategy = ActiveStrategy(
+        len(params.tag2idx), params.uncertainty_strategy, params.density_strategy,
+        params.confidence_threshold, params.size_threshold)
 
     for query in range(1, params.max_query_num + 1):
         num_unlabeled_data = data_loader.unlabled_length()
+        num_labeled_data = data_loader.train_length()
 
         if num_unlabeled_data > 0:
             # set model to evaluation mode
@@ -167,19 +168,21 @@ def train_active(model, data_loader, optimizer, scheduler, params, model_dir):
                     confidence = model.predict(
                         logits=logits, labels=padded_labels)[1]
 
-                unlabeled_data.append((logits.detach(), (padded_labels != -1).detach(), confidence.detach(), hiddens.detach()))
+                unlabeled_data.append((
+                    logits.detach(), padded_labels.detach(), confidence.detach(), hiddens.detach()))
             del unlabeled_iter
 
             labeled_data = []
-            # labeled_iter = data_loader.data_iterator('train', shuffle=False)
-            # for batch in labeled_iter:
-            #     batch = [elem.to(params.device) for elem in batch]
-            #     input_ids, label_ids, attention_mask, sentence_ids, label_mask = batch
-            #     with torch.no_grad():
-            #         outputs = model(input_ids, token_type_ids=sentence_ids, attention_mask=attention_mask,
-            #                         label_ids=label_ids, label_masks=label_mask, output_hidden=True)
-            #     labeled_data.append(outputs[2].detach())
-            # del labeled_iter
+            if strategy.output_label is True:
+                labeled_iter = data_loader.data_iterator('train', shuffle=False)
+                for batch in labeled_iter:
+                    batch = [elem.to(params.device) for elem in batch]
+                    input_ids, label_ids, attention_mask, sentence_ids, label_mask = batch
+                    with torch.no_grad():
+                        outputs = model(input_ids, token_type_ids=sentence_ids, attention_mask=attention_mask,
+                                        label_ids=label_ids, label_masks=label_mask, output_hidden=True)
+                    labeled_data.append(outputs[2].detach())
+                del labeled_iter
 
             unlabel_sims = strategy.pcosine_similarity(x1=torch.cat([x[3] for x in unlabeled_data], dim=0))
             label_sims = None if len(labeled_data) == 0 else strategy.pcosine_similarity(
@@ -187,20 +190,22 @@ def train_active(model, data_loader, optimizer, scheduler, params, model_dir):
 
             # Query a batch of unlabeled data, then put into train set
             query_num = min(num_unlabeled_data, params.query_batch_size)
-            query_idx = strategy.sample_batch(
-                total_num=num_unlabeled_data, query_num=query_num,
-                logitss=[x[0] for x in unlabeled_data], masks=[x[1] for x in unlabeled_data],
+            machine_indices, human_indices = strategy.sample_batch(
+                labeled_num=num_labeled_data, unlabeled_num=num_unlabeled_data, query_num=query_num,
+                logitss=[x[0] for x in unlabeled_data], masks=[(x[1] != -1) for x in unlabeled_data],
                 confidences=[x[2] for x in unlabeled_data],
                 unlabel_sims=unlabel_sims, label_sims=label_sims
             )
-            data_loader.active_update(query_idx)
+            data_loader.active_update(
+                machine_indices.numpy() if machine_indices is not None else None, human_indices.numpy(),
+                padded_labels=[x[1].cpu().numpy() for x in unlabeled_data])
         else:
             logging('No unlabeled data')
 
         # Train on new training data
         if params.incremental_train and num_unlabeled_data > 0:
             query_data = []
-            for idx in query_idx:
+            for idx in torch.cat([machine_indices, human_indices], dim=0):
                 query_data.append(data_loader.datasets['unlabeled'][idx])
             sample_data = [[query_data[r][c] for r in range(
                 len(query_data))] for c in range(len(query_data[0]))]
@@ -230,16 +235,19 @@ def train_active(model, data_loader, optimizer, scheduler, params, model_dir):
             # Early stopping and logging best f1
             if (patience_counter >= params.patience_num and query > params.min_query_num):
                 logging.info(
-                    "Early stop, Best val f1: {:05.2f}".format(best_val_f1))
+                    "Early stop, Best val f1: {:05.3f}".format(best_val_f1))
                 break
 
     if len(val_f1_track) > 0:
         csv_file = os.path.join(model_dir, 'val_f1.csv')
-        utils.save_csv(
-            strategy.get_strategy_label(params.use_crf),
-            np.array(val_f1_track), csv_file
-        )
-        logging.info('\n>>> Save val f1 track in {}'.format(csv_file))
+        try:
+            utils.save_csv(
+                strategy.get_strategy_label(params.use_crf),
+                np.array(val_f1_track), csv_file
+            )
+            logging.info('\n>>> Save val f1 track in {}'.format(csv_file))
+        except ValueError as e:
+            logging.info(e.msg)
 
 
 def main():

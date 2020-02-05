@@ -5,43 +5,54 @@ from torch.distributions.categorical import Categorical
 
 class ActiveStrategy(object):
 
-    def __init__(self, num_labels, uncertainty_strategy, density_strategy):
+    def __init__(
+        self, num_labels, uncertainty_strategy, density_strategy,
+        confidence_threshold, size_threshold):
 
         self.num_labels = num_labels
         self.beta = 1
+        self.size_threshold = size_threshold
+
+        if confidence_threshold.startswith('top') or confidence_threshold.startswith('abs'):
+            self.confidence_threshold = confidence_threshold
+        else:
+            raise ValueError('confidence_threshold format error')
+
+        self.label2func = {
+            'r': 'random_select',
+            'lc': 'least_confidence',
+            'te': 'token_entropy',
+            'tte': 'total_token_entropy',
+            'du': 'density_unlabeled',
+            'dl': 'density_labeled'
+        }
 
         if uncertainty_strategy == 'none' and density_strategy == 'none':
             raise ValueError('Uncertainty and density strategies can not be none at the same time')
 
         if uncertainty_strategy != 'none':
-            self.uncertainty_strategy = uncertainty_strategy.strip().split('+')
+            self.uncertainty_strategy = [self.label2func[x] for x in uncertainty_strategy.strip().split('+')]
         else:
             self.uncertainty_strategy = []
 
         if density_strategy != 'none':
-            self.density_strategy = density_strategy.strip().split('+')
+            self.density_strategy = [self.label2func[x] for x in density_strategy.strip().split('+')]
         else:
             self.density_strategy = []
 
-        self.label_map = {
-            'random_select': 'R',
-            'least_confidence': 'LC',
-            'token_entropy': 'TE',
-            'representative': 'Rep',
-            'total_token_entropy': 'TTE'
-        }
+    def output_label(self):
+
+        return 'dl' in self.density_strategy
 
     def get_strategy_label(self, use_crf):
 
-        uncertainty_labels = [self.label_map[name] for name in self.uncertainty_strategy]
-        density_labels = [self.label_map[name] for name in self.density_strategy]
-        uncertainty_labels = '+'.join(uncertainty_labels)
-        density_labels = '+'.join(density_labels)
+        uncertainty_labels = '+'.join(self.uncertainty_strategy)
+        density_labels = '+'.join(self.density_strategy)
 
         if len(uncertainty_labels) > 0 and len(density_labels) > 0:
             label = '{}+{}'.format(uncertainty_labels, density_labels)
         elif len(uncertainty_labels) == 0 and len(density_labels) == 0:
-            label = 'R'
+            raise ValueError('Uncertainty and density strategies can not be none at the same time')
         else:
             label = '{}{}'.format(uncertainty_labels, density_labels)
 
@@ -50,7 +61,21 @@ class ActiveStrategy(object):
 
         return label
 
-    def sample_batch(self, total_num, query_num, **kwargs):
+    def sample_batch(self, labeled_num, unlabeled_num, query_num, **kwargs):
+        """Qeury a batch for active learning. Before active learning, peform self-training
+
+        Args:
+            labeled_num: (int) the size of train set
+            unlabeled_num: (int) the size of unlabeled data set
+            query_num: (int) query batch size
+        Return:
+            indices: (tuple) indices of machine labeled examples and human labeled examples
+        """
+        if labeled_num >= self.size_threshold:
+            machine_indices = self.bootstrapping(query_num, **kwargs)
+            machine_indices = machine_indices.cpu()
+        else:
+            machine_indices = None
 
         uncertianty_scores = []
         density_scores = []
@@ -65,16 +90,16 @@ class ActiveStrategy(object):
             density_scores.append(scores.cpu())
 
         # Just make production
-        uncertianty_scores = torch.stack(uncertianty_scores) if len(uncertianty_scores) > 0 else torch.ones(total_num)
-        density_scores = torch.stack(density_scores) if len(density_scores) > 0 else torch.ones(total_num)
+        uncertianty_scores = torch.stack(uncertianty_scores) if len(uncertianty_scores) > 0 else torch.ones(unlabeled_num)
+        density_scores = torch.stack(density_scores) if len(density_scores) > 0 else torch.ones(unlabeled_num)
 
         # Combine two scores
         scores = torch.prod(torch.cat((uncertianty_scores.view(1, -1), density_scores.view(1, -1)), dim=0), dim=0)
 
         # Select topk as queried items
-        _, indices = torch.topk(scores, query_num)
+        _, human_indices = torch.topk(scores, query_num)
 
-        return indices
+        return (machine_indices, human_indices)
 
     def _token_entropy(self, query_num, logitss, masks, norm, **kwargs):
 
@@ -124,12 +149,33 @@ class ActiveStrategy(object):
         w2 = w1 if x2 is x1 else x2.norm(p=2, dim=1, keepdim=True)
         return 1 - torch.mm(x1, x2.t()) / (w1 * w2.t()).clamp(min=eps)
 
-    def representative_sample(self, query_num, label_sims, unlabel_sims, **kwargs):
+    def density_unlabeled_sample(self, query_num, unlabel_sims, **kwargs):
 
         unlabel_sims = torch.mean(unlabel_sims, dim=1)
         scores = torch.pow(unlabel_sims, self.beta)
-        if label_sims is not None:
-            label_sims = torch.mean(label_sims, dim=1)
-            scores = scores * torch.exp(-1 * label_sims)
 
         return scores
+
+    def density_labeled_sample(self, query_num, label_sims, **kwargs):
+
+        label_sims = torch.mean(label_sims, dim=1)
+        scores = scores * torch.exp(-1 * label_sims)
+
+        return scores
+
+    def bootstrapping(self, query_num, confidences, **kwargs):
+
+        confidences = torch.cat(confidences, dim=0)
+        threshold = float(self.confidence_threshold.split('_')[1])
+
+        if self.confidence_threshold.startswith('abs') and threshold <= 1:
+            indices = torch.nonzero((confidences > threshold).to(torch.int))
+            return indices.view(-1)
+        elif self.confidence_threshold.startswith('top'):
+            if threshold < 1:
+                _, indices = torch.topk(confidences, int(confidences.size(0) * threshold))
+            else:
+                _, indices = torch.topk(confidences, int(threshold))
+            return indices.view(-1)
+        else:
+            raise ValueError('Confidence threshold format error')
