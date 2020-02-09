@@ -45,4 +45,6 @@ if __name__ == '__main__':
     model_dir = os.path.join('experiments', args.dataset)
 
     lineplot(model_dir)
-    barplot(model_dir)
+
+    if os.path.exists(os.path.join(model_dir, 'test_f1.csv')):
+        barplot(model_dir)

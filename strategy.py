@@ -24,8 +24,10 @@ class ActiveStrategy(object):
             'te': 'token_entropy',
             'tte': 'total_token_entropy',
             'du': 'density_unlabeled',
-            'dl': 'density_labeled'
+            'dl': 'density_labeled',
+            'l': 'length'
         }
+        self.func2label = {self.label2func[k] : k for k in self.label2func}
 
         if uncertainty_strategy == 'none' and density_strategy == 'none':
             raise ValueError('Uncertainty and density strategies can not be none at the same time')
@@ -44,10 +46,10 @@ class ActiveStrategy(object):
 
         return 'dl' in self.density_strategy
 
-    def get_strategy_label(self, use_crf):
+    def get_strategy_label(self, use_crf, use_machine=False):
 
-        uncertainty_labels = '+'.join(self.uncertainty_strategy)
-        density_labels = '+'.join(self.density_strategy)
+        uncertainty_labels = '+'.join([self.func2label[s].upper() for s in self.uncertainty_strategy])
+        density_labels = '+'.join([self.func2label[s].upper() for s in self.density_strategy])
 
         if len(uncertainty_labels) > 0 and len(density_labels) > 0:
             label = '{}+{}'.format(uncertainty_labels, density_labels)
@@ -58,6 +60,9 @@ class ActiveStrategy(object):
 
         if use_crf is True:
             label = '{}+C'.format(label)
+
+        if use_machine is True:
+            label = '{}+M'.format(label)
 
         return label
 
@@ -77,27 +82,16 @@ class ActiveStrategy(object):
         else:
             machine_indices = None
 
-        uncertianty_scores = []
-        density_scores = []
+        strategy_scores = []
 
-        for strategy in self.uncertainty_strategy:
+        for strategy in self.uncertainty_strategy + self.density_strategy:
             strategy_func = getattr(self, '{}_sample'.format(strategy))
-            scores = strategy_func(query_num, **kwargs)
-            uncertianty_scores.append(scores.cpu())
-        for strategy in self.density_strategy:
-            strategy_func = getattr(self, '{}_sample'.format(strategy))
-            scores = strategy_func(query_num, **kwargs)
-            density_scores.append(scores.cpu())
+            scores = strategy_func(query_num, **kwargs).cpu()
+            strategy_scores.append(torch.softmax(scores, dim=0))
 
-        # Just make production
-        uncertianty_scores = torch.stack(uncertianty_scores) if len(uncertianty_scores) > 0 else torch.ones(unlabeled_num)
-        density_scores = torch.stack(density_scores) if len(density_scores) > 0 else torch.ones(unlabeled_num)
-
-        # Combine two scores
-        scores = torch.prod(torch.cat((uncertianty_scores.view(1, -1), density_scores.view(1, -1)), dim=0), dim=0)
-
-        # Select topk as queried items
-        _, human_indices = torch.topk(scores, query_num)
+        strategy_scores = torch.stack(strategy_scores)
+        probs = torch.prod(strategy_scores, dim=0)
+        _, human_indices = torch.topk(probs, query_num)
 
         return (machine_indices, human_indices)
 
@@ -126,10 +120,11 @@ class ActiveStrategy(object):
 
         return self._token_entropy(query_num=query_num, norm=False, **kwargs)
 
-    def random_select_sample(self, query_num, num_unlabeled, **kwargs):
+    def random_select_sample(self, query_num, unlabel_sims, **kwargs):
 
-        indices = np.random.choice(np.arange(num_unlabeled), query_num)
-        scores = np.ones(num_unlabeled, dtype=np.float32)
+        unlabeled_num = unlabel_sims.size(0)
+        indices = np.random.choice(np.arange(unlabeled_num), query_num)
+        scores = np.ones(unlabeled_num, dtype=np.float32)
         scores[indices] += 1
 
         return torch.from_numpy(scores)
@@ -163,9 +158,20 @@ class ActiveStrategy(object):
 
         return scores
 
-    def bootstrapping(self, query_num, confidences, **kwargs):
+    def length_sample(self, query_num, masks, **kwargs):
 
+        lens = [torch.sum(mask.float(), dim=1) for mask in masks]
+        lens = torch.cat(lens, dim=0)
+        scores = torch.log(lens)
+
+        return scores
+
+    def bootstrapping(self, query_num, confidences, masks, **kwargs):
+
+        lens = torch.cat([torch.sum(mask, dim=1) for mask in masks], dim=0)
         confidences = torch.cat(confidences, dim=0)
+        confidences = torch.pow(confidences, 1 / lens)
+
         threshold = float(self.confidence_threshold.split('_')[1])
 
         if self.confidence_threshold.startswith('abs') and threshold <= 1:

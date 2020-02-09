@@ -44,11 +44,11 @@ parser.add_argument('--weight_decay', default=0.01,
                     type=float, help='Weight decay for the optimizer')
 parser.add_argument('--clip_grad', default=1.0,
                     type=float, help='Gradient clipping')
-parser.add_argument('--warmup_steps', default=250, type=int,
+parser.add_argument('--warmup_steps', default=20, type=int,
                     help='Warmup configuration for the optimizer')
-parser.add_argument('--min_lr_ratio', default=0.05,
+parser.add_argument('--min_lr_ratio', default=0.1,
                     type=float, help='Minimum learning rate')
-parser.add_argument('--decay_steps', default=1500, type=int,
+parser.add_argument('--decay_steps', default=1000, type=int,
                     help="Decay steps for LambdLR scheduler")
 parser.add_argument('--adam_epsilon', default=1e-8,
                     type=float, help='Configuration for the optimizer')
@@ -64,7 +64,7 @@ parser.add_argument('--max_query_num', default=60, type=int,
                     help='Maximum number of queried batches with active learning')
 parser.add_argument('--min_query_num', default=40, type=int,
                     help='Minimum number of queried batches with active learning')
-parser.add_argument('--size_threshold', default=100, type=int,
+parser.add_argument('--size_threshold', default=320, type=int,
                     help='Self-training threshold for train set size')
 parser.add_argument('--confidence_threshold', default='top_10',
                     type=str, help='Threshold for self-training, abs_0.x|top_x')
@@ -218,8 +218,8 @@ def train_active(model, data_loader, optimizer, scheduler, params, model_dir):
         # Evaluate for val dataset, perform early stopping
         if query % params.eval_every == 0:
             num_unlabeled, num_labeled, num_machine = data_loader.get_dataset_info() 
-            logging.info('\n-Evaluate at query {}, num_unlabel={}, num_label={}, num_machine={}'.format(
-                query, num_unlabeled, num_labeled, num_machine))
+            logging.info('\n-Evaluate at query {}/{}, num_unlabel={}, num_label={}, num_machine={}, lr={:.5f}'.format(
+                query, params.max_query_num, num_unlabeled, num_labeled, num_machine, optimizer.param_groups[0]['lr']))
             val_metrics = evaluate(model, val_data_iterator, params, mark='Val')
 
             improve_f1 = val_metrics['f1'] - best_val_f1
@@ -242,12 +242,12 @@ def train_active(model, data_loader, optimizer, scheduler, params, model_dir):
         csv_file = os.path.join(model_dir, 'val_f1.csv')
         try:
             utils.save_csv(
-                strategy.get_strategy_label(params.use_crf),
+                strategy.get_strategy_label(params.use_crf, params.size_threshold > 0),
                 np.array(val_f1_track), csv_file
             )
             logging.info('\n>>> Save val f1 track in {}'.format(csv_file))
         except ValueError as e:
-            logging.info(e.msg)
+            logging.info(str(e))
 
 
 def main():
