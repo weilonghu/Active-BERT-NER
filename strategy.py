@@ -42,7 +42,7 @@ class ActiveStrategy(object):
         else:
             self.density_strategy = []
 
-    def output_label(self):
+    def output_labeled_hiddens(self):
 
         return 'dl' in self.density_strategy
 
@@ -144,15 +144,20 @@ class ActiveStrategy(object):
         w2 = w1 if x2 is x1 else x2.norm(p=2, dim=1, keepdim=True)
         return 1 - torch.mm(x1, x2.t()) / (w1 * w2.t()).clamp(min=eps)
 
-    def density_unlabeled_sample(self, query_num, unlabel_sims, **kwargs):
+    def density_unlabeled_sample(self, query_num, unlabeled_hiddens, **kwargs):
 
+        unlabel_sims = self.pcosine_similarity(x1=torch.cat(unlabeled_hiddens, dim=0))
         unlabel_sims = torch.mean(unlabel_sims, dim=1)
         scores = torch.pow(unlabel_sims, self.beta)
 
         return scores
 
-    def density_labeled_sample(self, query_num, label_sims, **kwargs):
+    def density_labeled_sample(self, query_num, unlabeled_hiddens, labeled_hiddens, **kwargs):
 
+        label_sims = self.pcosine_similarity(
+            x1=torch.cat(unlabeled_hiddens, dim=0),
+            x2=torch.cat(labeled_hiddens, dim=0)
+        )
         label_sims = torch.mean(label_sims, dim=1)
         scores = scores * torch.exp(-1 * label_sims)
 

@@ -18,7 +18,7 @@ from evaluate import evaluate
 
 
 parser = argparse.ArgumentParser()
-parser.add_argument('--dataset', default='conll',
+parser.add_argument('--dataset', default='msra',
                     help="Directory containing the dataset")
 parser.add_argument('--seed', type=int, default=2019,
                     help="random seed for initialization")
@@ -36,7 +36,7 @@ parser.add_argument('--full_finetuning', action='store_false',
                     help='BERT: If full finetuning bert model')
 parser.add_argument('--max_len', default=128, type=int,
                     help='BERT: maximul sequence lenghth')
-parser.add_argument('--bert_model_dir', default='pretrained_bert_models/bert_base_cased',
+parser.add_argument('--bert_model_dir', default='pretrained_bert_models/bert_base_chinese',
                     type=str, help='BERT: directory containing BERT model')
 parser.add_argument('--learning_rate', default=5e-5,
                     type=float, help='Learning rate for the optimizer')
@@ -167,12 +167,12 @@ def train_active(model, data_loader, optimizer, scheduler, params, model_dir):
                     confidence = model.predict(
                         logits=logits, labels=padded_labels)[1]
 
-                unlabeled_data.append((
-                    logits.detach(), padded_labels.detach(), confidence.detach(), hiddens.detach()))
+                    unlabeled_data.append((
+                        logits.detach(), padded_labels.detach(), confidence.detach(), hiddens.detach().cpu()))
             del unlabeled_iter
 
             labeled_data = []
-            if strategy.output_label is True:
+            if strategy.output_labeled_hiddens() is True:
                 labeled_iter = data_loader.data_iterator('train', shuffle=False)
                 for batch in labeled_iter:
                     batch = [elem.to(params.device) for elem in batch]
@@ -180,20 +180,16 @@ def train_active(model, data_loader, optimizer, scheduler, params, model_dir):
                     with torch.no_grad():
                         outputs = model(input_ids, token_type_ids=sentence_ids, attention_mask=attention_mask,
                                         label_ids=label_ids, label_masks=label_mask, output_hidden=True)
-                    labeled_data.append(outputs[2].detach())
+                        labeled_data.append(outputs[2].detach().cpu())
                 del labeled_iter
-
-            unlabel_sims = strategy.pcosine_similarity(x1=torch.cat([x[3] for x in unlabeled_data], dim=0))
-            label_sims = None if len(labeled_data) == 0 else strategy.pcosine_similarity(
-                x1=torch.cat([x[3] for x in unlabeled_data], dim=0), x2=torch.cat(labeled_data, dim=0))
 
             # Query a batch of unlabeled data, then put into train set
             query_num = min(num_unlabeled, params.query_batch_size)
             machine_indices, human_indices = strategy.sample_batch(
                 labeled_num=num_labeled, unlabeled_num=num_unlabeled, query_num=query_num,
                 logitss=[x[0] for x in unlabeled_data], masks=[(x[1] != -1) for x in unlabeled_data],
-                confidences=[x[2] for x in unlabeled_data],
-                unlabel_sims=unlabel_sims, label_sims=label_sims
+                confidences=[x[2] for x in unlabeled_data], labeled_hiddens=labeled_data,
+                unlabeled_hiddens=[x[3] for x in unlabeled_data]
             )
             data_loader.active_update(
                 machine_indices.numpy() if machine_indices is not None else None, human_indices.numpy(),
@@ -349,13 +345,17 @@ def main():
 
         scheduler = LambdaLR(optimizer, lr_lambda=lr_lambda, last_epoch=-1)
 
-    # Train the model with train set and evaluate the model with valid set
+    # Train the model with train set if exists
     if params.train_size > 0:
         logging.info(
             "\n>>> Starting training for {} epoch(s)".format(params.num_epoch))
         train_iter = data_loader.data_iterator('train', shuffle=True)
         train(model, train_iter, optimizer, scheduler, params)
         del train_iter
+
+        val_data_iterator = data_loader.data_iterator('val', shuffle=False)
+        evaluate(model, val_data_iterator, params, mark='Val')
+        model.save_pretrained(model_dir)
 
     if params.train_size < 1:
         logging.info('\n>>> Start training using strategy: {}, {}'.format(
