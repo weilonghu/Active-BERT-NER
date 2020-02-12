@@ -108,40 +108,47 @@ def save_json(params, json_file):
         json.dump(params, fp, indent=4)
 
 
-def save_checkpoint(state, is_best, checkpoint):
-    """Saves model and training parameters at checkpoint + 'last.pth.tar'. If is_best==True, also saves
-    checkpoint + 'best.pth.tar'
+def save_checkpoint(model, model_dir, data_state, optimizer, scheduler):
+    """Save model to 'model_dir/pytorch_model.bin', and save data_state to 'model_dir/data_state.pt'
 
     Args:
-        state: (dict) contains model's state_dict, may contain other keys such as epoch, optimizer state_dict
-        is_best: (bool) True if it is the best model seen till now
-        checkpoint: (string) folder where parameters are to be saved
+        model: (transformers.BertForTokenClassification) model to be saved
+        model_dir: (bool) directory for saving model, e.g. 'experiments/conll'
+        data_state: (dict) dataset state, in order to restore dataset
+        optimizer: (transformers.optimization), in order to restore learning rate
+        scheduler: (torch.optim.lr_scheduler), in order to restore learning rate scheduler
     """
-    filepath = os.path.join(checkpoint, 'last.pth.tar')
-    if not os.path.exists(checkpoint):
-        print("Checkpoint Directory does not exist! Making directory {}".format(checkpoint))
-        os.mkdir(checkpoint)
-    torch.save(state, filepath)
-    if is_best:
-        shutil.copyfile(filepath, os.path.join(checkpoint, 'best.pth.tar'))
+    filepath = os.path.join(model_dir, 'model.ckpt')
+    state_dict = {
+        'data_state': data_state,
+        'optimizer': optimizer.state_dict(),
+        'scheduler': scheduler.state_dict()
+    }
+    torch.save(state_dict, filepath)
+    model.save_pretrained(model_dir)
 
 
-def load_checkpoint(checkpoint, model, optimizer=None):
+def load_checkpoint(model_class, restore_dir, optimizer=None, scheduler=None):
     """Loads model parameters (state_dict) from file_path. If optimizer is provided, loads state_dict of
     optimizer assuming it is present in checkpoint.
 
     Args:
-        checkpoint: (string) filename which needs to be loaded
-        model: (torch.nn.Module) model for which the parameters are loaded
-        optimizer: (torch.optim) optional: resume optimizer from checkpoint
+        model_class: (transformers.BertForTokenClassification) class name
+        restore_dir: (string) directory including model
+        optimizer: (transformers.optimization) optional: resume optimizer from checkpoint
+        scheduler: (torch.optim) optional: resume scheduler from checkpoint
     """
-    if not os.path.exists(checkpoint):
-        raise ("File doesn't exist {}".format(checkpoint))
-    checkpoint = torch.load(checkpoint)
-    # model.load_state_dict(checkpoint['state_dict'])
-    model.load_state_dict(checkpoint['state_dict'])
+    filepath = os.path.join(restore_dir, 'model.ckpt')
+    if not os.path.exists(filepath):
+        raise ("File doesn't exist {}".format(filepath))
+
+    state_dict = torch.load(filepath)
+    model = model_class.from_pretrained(restore_dir)
+    data_state = state_dict['data_state']
 
     if optimizer:
-        optimizer.load_state_dict(checkpoint['optim_dict'])
+        optimizer.load_state_dict(state_dict['optimizer'])
+    if scheduler:
+        scheduler.load_state_dict(state_dict['scheduler'])
 
-    return checkpoint
+    return (model, data_state)

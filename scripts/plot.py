@@ -6,11 +6,14 @@ import pandas as pd
 sns.set(style="whitegrid")
 
 parser = argparse.ArgumentParser()
-parser.add_argument('--dataset', default='conll', help="Directory containing the dataset")
+parser.add_argument('--dataset', type=str, default='conll', help="Directory containing the dataset")
+parser.add_argument('--xlim', type=str, default='20,60', help='Range of x axis')
+parser.add_argument('--ylim', type=str, default='0.6,1.0', help='Range of y axis')
 
 
-def lineplot(model_dir):
+def lineplot(model_dir, xlim, ylim):
 
+    # Support 8 kinds of lines
     dash_styles = [
         "",
         (4, 1.5),
@@ -23,7 +26,7 @@ def lineplot(model_dir):
 
     df = pd.read_csv(os.path.join(model_dir, 'val_f1.csv'), index_col=0)
     ax = sns.lineplot(data=df, palette="tab10", linewidth=2, dashes=dash_styles)
-    ax.set(ylim=(0.6, 1.0), xlim=(10, 60))
+    ax.set(ylim=ylim, xlim=xlim)
     ax.set(xlabel='Batch', ylabel='Val F1')
     ax.get_figure().savefig(os.path.join(model_dir, 'val_f1.png'))
 
@@ -44,7 +47,10 @@ if __name__ == '__main__':
     args = parser.parse_args()
     model_dir = os.path.join('experiments', args.dataset)
 
-    lineplot(model_dir)
+    xlim = [int(x) for x in args.xlim.split(',')]
+    ylim = [float(x) for x in args.ylim.split(',')]
+
+    lineplot(model_dir, xlim=tuple(xlim), ylim=tuple(ylim))
 
     if os.path.exists(os.path.join(model_dir, 'test_f1.csv')):
         barplot(model_dir)

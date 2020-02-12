@@ -318,7 +318,7 @@ def main():
             from apex.optimizers import FusedAdam
         except ImportError:
             raise ImportError(
-                "lease install apex from https://www.github.com/nvidia/apex to use fp16 training.")
+                "please install apex from https://www.github.com/nvidia/apex to use fp16 training.")
         optimizer = FusedAdam(optimizer_grouped_parameters,
                               lr=params.learning_rate,
                               bias_correction=False,
