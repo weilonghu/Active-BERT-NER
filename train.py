@@ -18,7 +18,7 @@ from evaluate import evaluate
 
 
 parser = argparse.ArgumentParser()
-parser.add_argument('--dataset', default='msra',
+parser.add_argument('--dataset', default='conll',
                     help="Directory containing the dataset")
 parser.add_argument('--seed', type=int, default=2019,
                     help="random seed for initialization")
@@ -36,7 +36,7 @@ parser.add_argument('--full_finetuning', action='store_false',
                     help='BERT: If full finetuning bert model')
 parser.add_argument('--max_len', default=128, type=int,
                     help='BERT: maximul sequence lenghth')
-parser.add_argument('--bert_model_dir', default='pretrained_bert_models/bert_base_chinese',
+parser.add_argument('--bert_model_dir', default='pretrained_bert_models/bert_base_cased',
                     type=str, help='BERT: directory containing BERT model')
 parser.add_argument('--learning_rate', default=5e-5,
                     type=float, help='Learning rate for the optimizer')
@@ -89,50 +89,45 @@ parser.add_argument('--use_crf', action='store_true',
 
 
 def train(model, data_iterator, optimizer, scheduler, params):
-    """Train the model on `steps` batches"""
+    """Train the model for one epoch"""
     # set model to training mode
     model.train()
 
-    for epoch in range(params.num_epoch):
-        # a running average object for loss
-        loss_avg = utils.RunningAverage()
+    # a running average object for loss
+    loss_avg = utils.RunningAverage()
 
-        for step, batch in enumerate(data_iterator):
-            # fetch the next training batch
-            batch = [elem.to(params.device) for elem in batch]
-            input_ids, label_ids, attention_mask, sentence_ids, label_mask = batch
+    for step, batch in enumerate(data_iterator):
+        # fetch the next training batch
+        batch = [elem.to(params.device) for elem in batch]
+        input_ids, label_ids, attention_mask, sentence_ids, label_mask = batch
 
-            # compute model output and loss
-            outputs = model(input_ids, token_type_ids=sentence_ids, attention_mask=attention_mask,
-                            label_ids=label_ids, label_masks=label_mask)
-            logits, padded_labels = outputs[0], outputs[1]
-            loss = model.loss(logits=logits, labels=padded_labels)
+        # compute model output and loss
+        outputs = model(input_ids, token_type_ids=sentence_ids, attention_mask=attention_mask,
+                        label_ids=label_ids, label_masks=label_mask)
+        logits, padded_labels = outputs[0], outputs[1]
+        loss = model.loss(logits=logits, labels=padded_labels)
 
-            if params.n_gpu > 1 and params.multi_gpu:
-                loss = loss.mean()  # mean() to average on multi-gpu
+        if params.n_gpu > 1 and params.multi_gpu:
+            loss = loss.mean()  # mean() to average on multi-gpu
 
-            if params.fp16:
-                optimizer.backward(loss)
-            else:
-                loss.backward()
+        if params.fp16:
+            optimizer.backward(loss)
+        else:
+            loss.backward()
 
-            # gradient clipping
-            nn.utils.clip_grad_norm_(
-                parameters=model.parameters(), max_norm=params.clip_grad)
+        # gradient clipping
+        nn.utils.clip_grad_norm_(
+            parameters=model.parameters(), max_norm=params.clip_grad)
 
-            # performs updates using calculated gradients
-            optimizer.step()
-            if scheduler is not None:
-                scheduler.step()
-            # clear previous gradients, compute gradients of all variables wrt loss
-            model.zero_grad()
+        # performs updates using calculated gradients
+        optimizer.step()
+        if scheduler is not None:
+            scheduler.step()
+        # clear previous gradients, compute gradients of all variables wrt loss
+        model.zero_grad()
 
-            # update the average loss
-            loss_avg.update(loss.item())
-
-            if (step + 1) % params.log_every == 0:
-                logging.info('Training epoch={}, step={}, loss={:.4f}'.format(
-                    epoch + 1, step + 1, loss_avg()))
+        # update the average loss
+        loss_avg.update(loss.item())
 
     return loss_avg()
 
@@ -350,7 +345,9 @@ def main():
         logging.info(
             "\n>>> Starting training for {} epoch(s)".format(params.num_epoch))
         train_iter = data_loader.data_iterator('train', shuffle=True)
-        train(model, train_iter, optimizer, scheduler, params)
+        for epoch in range(1, params.num_epoch + 1):
+            loss = train(model, train_iter, optimizer, scheduler, params)
+            logging.info('Average loss of epoch {} is {:06.5f}'.format(epoch, loss))
         del train_iter
 
         val_data_iterator = data_loader.data_iterator('val', shuffle=False)
@@ -362,12 +359,6 @@ def main():
             params.uncertainty_strategy, params.density_strategy))
         train_active(model, data_loader, optimizer,
                         scheduler, params, model_dir)
-
-        # logging.info("\n>>> Starting training for {} epoch(s) after active learning".format(
-        #     params.num_epoch))
-        # train_iter = data_loader.data_iterator('train', shuffle=True)
-        # train(model, train_iter, optimizer, scheduler, params)
-        # del train_iter
 
 
 if __name__ == '__main__':
