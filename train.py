@@ -46,9 +46,9 @@ parser.add_argument('--clip_grad', default=1.0,
                     type=float, help='Gradient clipping')
 parser.add_argument('--warmup_steps', default=20, type=int,
                     help='Warmup configuration for the optimizer')
-parser.add_argument('--min_lr_ratio', default=0.1,
+parser.add_argument('--min_lr_ratio', default=0.05,
                     type=float, help='Minimum learning rate')
-parser.add_argument('--decay_steps', default=1000, type=int,
+parser.add_argument('--decay_steps', default=1800, type=int,
                     help="Decay steps for LambdLR scheduler")
 parser.add_argument('--adam_epsilon', default=1e-8,
                     type=float, help='Configuration for the optimizer')
@@ -345,13 +345,14 @@ def main():
         logging.info(
             "\n>>> Starting training for {} epoch(s)".format(params.num_epoch))
         train_iter = data_loader.data_iterator('train', shuffle=True)
+        val_iterator = data_loader.data_iterator('val', shuffle=False)
         for epoch in range(1, params.num_epoch + 1):
             loss = train(model, train_iter, optimizer, scheduler, params)
             logging.info('Average loss of epoch {} is {:06.5f}'.format(epoch, loss))
+            evaluate(model, val_iterator, params, mark='Val')
         del train_iter
+        del val_iterator
 
-        val_data_iterator = data_loader.data_iterator('val', shuffle=False)
-        evaluate(model, val_data_iterator, params, mark='Val')
         model.save_pretrained(model_dir)
 
     if params.train_size < 1:

@@ -120,9 +120,9 @@ class ActiveStrategy(object):
 
         return self._token_entropy(query_num=query_num, norm=False, **kwargs)
 
-    def random_select_sample(self, query_num, unlabel_sims, **kwargs):
+    def random_select_sample(self, query_num, confidences, **kwargs):
 
-        unlabeled_num = unlabel_sims.size(0)
+        unlabeled_num = torch.cat(confidences, dim=0).size(0)
         indices = np.random.choice(np.arange(unlabeled_num), query_num)
         scores = np.ones(unlabeled_num, dtype=np.float32)
         scores[indices] += 1
