@@ -4,7 +4,8 @@ import argparse
 import random
 
 parser = argparse.ArgumentParser()
-parser.add_argument('--dataset', default='msra', help="Directory containing the dataset")
+parser.add_argument('--dataset', default='conll', help="Directory containing the dataset")
+parser.add_argument('--bio2bioes', action='store_true', help='If set true, convert BIO tags to BIOES tags')
 
 
 def load_dataset(path_dataset):
@@ -75,6 +76,44 @@ def build_tags(data_dir, tags_file):
     return tags
 
 
+def convert_tags(data_dir):
+    """Convert tags after saving dataset
+    """
+    data_types = ['train', 'val', 'test']
+    for data_type in data_types:
+        tags_path = os.path.join(data_dir, data_type, 'tags.txt')
+        with open(tags_path, 'r', encoding='utf-8') as file:
+            tag_seqs = [line.strip().split(' ') for line in file]
+        new_tag_seqs = map(iob_iobes, tag_seqs)
+        new_tag_str = [' '.join(tag_seq) for tag_seq in new_tag_seqs]
+        with open(tags_path, 'w', encoding='utf-8') as file:
+            file.write('\n'.join(new_tag_str))
+
+
+def iob_iobes(tags):
+    """IOB -> IOBES
+    """
+    new_tags = []
+    for i, tag in enumerate(tags):
+        if tag == 'O':
+            new_tags.append(tag)
+        elif tag.split('-')[0] == 'B':
+            if i + 1 != len(tags) and \
+               tags[i + 1].split('-')[0] == 'I':
+                new_tags.append(tag)
+            else:
+                new_tags.append(tag.replace('B-', 'S-'))
+        elif tag.split('-')[0] == 'I':
+            if i + 1 < len(tags) and \
+                    tags[i + 1].split('-')[0] == 'I':
+                new_tags.append(tag)
+            else:
+                new_tags.append(tag.replace('I-', 'E-'))
+        else:
+            raise Exception('Invalid IOB format!')
+    return new_tags
+
+
 if __name__ == '__main__':
     args = parser.parse_args()
 
@@ -105,6 +144,10 @@ if __name__ == '__main__':
     save_dataset(train, data_dir + '/train')
     save_dataset(val, data_dir + '/val')
     save_dataset(test, data_dir + '/test')
+
+    # Convert BIO to BIOES
+    if args.bio2bioes is True:
+        convert_tags(data_dir)
 
     # Build tags from dataset
     build_tags(data_dir, data_dir + '/tags.txt')
