@@ -18,6 +18,8 @@ from evaluate import evaluate
 
 
 parser = argparse.ArgumentParser()
+parser.add_argument('--base_dir', default='/data/huweilong/AS-NER',
+                    help='Directory containing other child directories')
 parser.add_argument('--dataset', default='conll',
                     help="Directory containing the dataset")
 parser.add_argument('--seed', type=int, default=2019,
