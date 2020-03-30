@@ -20,9 +20,9 @@ from evaluate import evaluate
 parser = argparse.ArgumentParser()
 parser.add_argument('--base_dir', default='/data/huweilong/AS-NER',
                     help='Directory containing other child directories')
-parser.add_argument('--dataset', default='conll',
+parser.add_argument('--dataset', default='wnut17',
                     help="Directory containing the dataset")
-parser.add_argument('--seed', type=int, default=2019,
+parser.add_argument('--seed', type=int, default=2020,
                     help="random seed for initialization")
 parser.add_argument('--multi_gpu', default=False, action='store_true',
                     help="Whether to use multiple GPUs if available")
@@ -246,7 +246,7 @@ def train_active(model, data_loader, optimizer, scheduler, params, model_dir):
 def main():
     args = parser.parse_args()
 
-    model_dir = 'experiments/' + args.dataset
+    model_dir = os.path.join(args.base_dir, 'experiments', args.dataset)
     # save the parameters to json file
     json_path = os.path.join(model_dir, 'params.json')
     utils.save_json(vars(args), json_path)
@@ -272,8 +272,11 @@ def main():
 
     # Create the input data pipeline
     logging.info("Loading the datasets...")
-    data_loader = DataLoader(os.path.join(
-        'data', params.dataset), params.bert_model_dir, params)
+    data_loader = DataLoader(
+        os.path.join(params.base_dir, 'data', params.dataset),
+        os.path.join(params.base_dir, params.bert_model_dir),
+        params
+    )
 
     # Prepare model
     if params.use_crf is True:
@@ -286,7 +289,8 @@ def main():
         logging.info('Restore model from {}'.format(params.restore_dir))
     else:
         model = BertForSequenceTagging.from_pretrained(
-            params.bert_model_dir, num_labels=len(params.tag2idx))
+            os.path.join(params.base_dir, params.bert_model_dir),
+            num_labels=len(params.tag2idx))
     model.to(params.device)
     if args.fp16:
         model.half()

@@ -4,7 +4,9 @@ import argparse
 import random
 
 parser = argparse.ArgumentParser()
-parser.add_argument('--dataset', default='conll', help="Directory containing the dataset")
+parser.add_argument('--base_dir', default='/data/huweilong/AS-NER',
+                    help='Directory containing other child directories')
+parser.add_argument('--dataset', default='wnut17', help="Directory containing the dataset")
 parser.add_argument('--bio2bioes', action='store_true', help='If set true, convert BIO tags to BIOES tags')
 
 
@@ -15,7 +17,7 @@ def load_dataset(path_dataset):
         words, tags = [], []
         # Each line of the file corresponds to one word and tag
         for line in f:
-            if line != '\n':
+            if line != '\n' and len(line.strip()) != 0:
                 line = line.strip('\n')
                 if len(line.strip()) == 1:
                     continue
@@ -117,10 +119,10 @@ def iob_iobes(tags):
 if __name__ == '__main__':
     args = parser.parse_args()
 
-    data_dir = 'data/' + args.dataset
-    path_train = data_dir + '/train_bio'
-    path_val = data_dir + '/val_bio'
-    path_test = data_dir + '/test_bio'
+    data_dir = os.path.join(args.base_dir, 'data', args.dataset)
+    path_train = data_dir + '/train.conll'
+    path_val = data_dir + '/val.conll'
+    path_test = data_dir + '/test.conll'
     msg = f'{path_train} or {path_test} file not found. Make sure you have downloaded the right dataset'
     assert os.path.isfile(path_train) and os.path.isfile(path_test), msg
 
